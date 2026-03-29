@@ -1,0 +1,15 @@
+{
+    "mcpServers": {
+        "jina": {
+            "command": "npx",
+            "args": ["jina-mcp-tools"],
+            "env": {
+                "JINA_API_KEY": "x"
+            }
+        },
+        "retrieval": {
+            "url": "http://localhost:8000/mcp"
+        }
+    },
+    "nativeTools": [{"module": "test/test_tool.py"}]
+}
