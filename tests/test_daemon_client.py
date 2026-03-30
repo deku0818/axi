@@ -1,7 +1,5 @@
 """Daemon 客户端测试：连接错误处理和超时。"""
 
-import asyncio
-
 import pytest
 
 from axi.daemon.client import _send

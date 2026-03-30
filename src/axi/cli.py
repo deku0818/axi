@@ -7,13 +7,13 @@ from pathlib import Path
 import typer
 from pydantic import BaseModel
 
-logger = logging.getLogger(__name__)
-
 from axi.daemon.client import ensure_daemon, is_daemon_running, send_request
 from axi.daemon.protocol import PID_PATH, DaemonRequest, DaemonResponse
 from axi.executor import Executor
 from axi.models import RunResult
 from axi.registry import Registry, ToolResolveError
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="axi",

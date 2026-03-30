@@ -42,9 +42,9 @@ class TestExecutorErrors:
     def test_native_function_not_registered(self):
         """Registry 有 meta 但 _native_functions 中没有对应函数。"""
         registry = Registry()
-        registry.register(ToolMeta(
-            name="ghost_tool", description="test", source=ToolSource.NATIVE
-        ))
+        registry.register(
+            ToolMeta(name="ghost_tool", description="test", source=ToolSource.NATIVE)
+        )
         # 确保函数不在 native 注册表中
         _native_functions.pop("ghost_tool", None)
 

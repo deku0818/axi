@@ -23,7 +23,9 @@ class TestToolMetaValidation:
             ToolMeta(name="echo", description="test", source=ToolSource.MCP)
 
     def test_mcp_tool_with_server_ok(self):
-        meta = ToolMeta(name="echo", server="my-server", description="test", source=ToolSource.MCP)
+        meta = ToolMeta(
+            name="echo", server="my-server", description="test", source=ToolSource.MCP
+        )
         assert meta.full_name == "my-server/echo"
 
     def test_native_tool_without_server_ok(self):
@@ -31,7 +33,9 @@ class TestToolMetaValidation:
         assert meta.full_name == "greet"
 
     def test_native_tool_with_server_ok(self):
-        meta = ToolMeta(name="greet", server="my-mod", description="test", source=ToolSource.NATIVE)
+        meta = ToolMeta(
+            name="greet", server="my-mod", description="test", source=ToolSource.NATIVE
+        )
         assert meta.full_name == "my-mod/greet"
 
 

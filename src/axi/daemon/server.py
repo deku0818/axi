@@ -7,8 +7,6 @@ import signal
 import sys
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
 from axi.daemon.protocol import (
     SOCKET_DIR,
     SOCKET_PATH,
@@ -19,6 +17,8 @@ from axi.daemon.protocol import (
 from axi.models import ToolSource
 from axi.providers.mcp import MCPProvider
 from axi.registry import Registry, ToolResolveError
+
+logger = logging.getLogger(__name__)
 
 
 class DaemonServer:
@@ -38,7 +38,9 @@ class DaemonServer:
             tools = await self.mcp_provider.connect_all(configs)
             for tool_meta in tools:
                 self.registry.register(tool_meta)
-            logger.info("Loaded %d tools from %d MCP server(s)", len(tools), len(configs))
+            logger.info(
+                "Loaded %d tools from %d MCP server(s)", len(tools), len(configs)
+            )
 
         # 确保 socket 目录存在
         os.makedirs(SOCKET_DIR, exist_ok=True)
@@ -118,8 +120,12 @@ class DaemonServer:
         return DaemonResponse.success([t.model_dump(exclude_none=True) for t in tools])
 
     async def _handle_search(self, req: DaemonRequest) -> DaemonResponse:
-        results = self.registry.search(req.query or "", regex=req.regex, top_k=req.top_k)
-        return DaemonResponse.success([r.model_dump(exclude_none=True) for r in results])
+        results = self.registry.search(
+            req.query or "", regex=req.regex, top_k=req.top_k
+        )
+        return DaemonResponse.success(
+            [r.model_dump(exclude_none=True) for r in results]
+        )
 
     async def _handle_describe(self, req: DaemonRequest) -> DaemonResponse:
         if not req.tool_name:
@@ -139,11 +145,15 @@ class DaemonServer:
             return DaemonResponse.fail(str(e))
 
         if meta.source != ToolSource.MCP:
-            return DaemonResponse.fail("Native tools should be executed locally, not via daemon")
+            return DaemonResponse.fail(
+                "Native tools should be executed locally, not via daemon"
+            )
         if not meta.server:
             return DaemonResponse.fail("MCP tool missing server")
 
-        result = await self.mcp_provider.call_tool(meta.server, meta.name, req.params or {})
+        result = await self.mcp_provider.call_tool(
+            meta.server, meta.name, req.params or {}
+        )
         if result.status == "success":
             return DaemonResponse.success(result.data)
         return DaemonResponse.fail(result.error or "Unknown error")
@@ -166,7 +176,9 @@ def run_daemon(config_path: str = "axi.json") -> None:
     axi_logger = logging.getLogger("axi")
     axi_logger.setLevel(logging.DEBUG)
     handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
     axi_logger.addHandler(handler)
     server = DaemonServer(Path(config_path))
     asyncio.run(server.start())

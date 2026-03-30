@@ -69,15 +69,19 @@ async def test_mcp_provider_connect_all(mock_config):
 
 def test_mcp_load_config(tmp_path):
     config_file = tmp_path / "axi.json"
-    config_file.write_text(json.dumps({
-        "mcpServers": {
-            "my-server": {
-                "command": "python",
-                "args": ["server.py"],
-                "env": {"API_KEY": "xxx"},
+    config_file.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "my-server": {
+                        "command": "python",
+                        "args": ["server.py"],
+                        "env": {"API_KEY": "xxx"},
+                    }
+                }
             }
-        }
-    }))
+        )
+    )
 
     provider = MCPProvider()
     configs = provider.load_config(config_file)

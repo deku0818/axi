@@ -9,9 +9,30 @@ from axi.registry import Registry, ToolResolveError
 @pytest.fixture
 def registry():
     r = Registry()
-    r.register(ToolMeta(name="echo", server="server-a", description="Echo tool", source=ToolSource.MCP))
-    r.register(ToolMeta(name="echo", server="server-b", description="Another echo", source=ToolSource.MCP))
-    r.register(ToolMeta(name="greet", server="server-a", description="Greet tool", source=ToolSource.MCP))
+    r.register(
+        ToolMeta(
+            name="echo",
+            server="server-a",
+            description="Echo tool",
+            source=ToolSource.MCP,
+        )
+    )
+    r.register(
+        ToolMeta(
+            name="echo",
+            server="server-b",
+            description="Another echo",
+            source=ToolSource.MCP,
+        )
+    )
+    r.register(
+        ToolMeta(
+            name="greet",
+            server="server-a",
+            description="Greet tool",
+            source=ToolSource.MCP,
+        )
+    )
     return r
 
 
@@ -52,7 +73,9 @@ class TestRegistryMethods:
 
     def test_set_server(self):
         r = Registry()
-        r.register(ToolMeta(name="my_tool", description="test", source=ToolSource.NATIVE))
+        r.register(
+            ToolMeta(name="my_tool", description="test", source=ToolSource.NATIVE)
+        )
         assert "my_tool" in r.list_names()
 
         r.set_server("my_tool", "my-module")

@@ -69,7 +69,9 @@ class Registry:
         self._tools[updated.full_name] = updated
         self._dirty = True
 
-    def search(self, query: str, regex: bool = False, top_k: int = 10) -> list[SearchResult]:
+    def search(
+        self, query: str, regex: bool = False, top_k: int = 10
+    ) -> list[SearchResult]:
         """搜索工具。默认按子串匹配，--regex 使用正则。"""
         self._rebuild_index()
         if regex:

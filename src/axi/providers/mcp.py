@@ -48,7 +48,9 @@ class MCPServerConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_transport(self) -> Self:
         if not self.command and not self.url:
-            raise ValueError(f"MCP server '{self.server}' must have either 'command' or 'url'")
+            raise ValueError(
+                f"MCP server '{self.server}' must have either 'command' or 'url'"
+            )
         return self
 
 
@@ -96,7 +98,9 @@ class MCPConnection:
                     name=t.name,
                     server=self.config.server,
                     description=t.description or "",
-                    input_schema=t.inputSchema if isinstance(t.inputSchema, dict) else {},
+                    input_schema=t.inputSchema
+                    if isinstance(t.inputSchema, dict)
+                    else {},
                     source=ToolSource.MCP,
                 )
             )
@@ -138,7 +142,9 @@ class MCPProvider:
     def __init__(self) -> None:
         self._connections: dict[str, MCPConnection] = {}
 
-    def load_config(self, config_path: Path = DEFAULT_CONFIG_PATH) -> list[MCPServerConfig]:
+    def load_config(
+        self, config_path: Path = DEFAULT_CONFIG_PATH
+    ) -> list[MCPServerConfig]:
         """读取 axi.json 中的 mcpServers 配置。"""
         raw = load_axi_config(config_path)
         mcp_servers = raw.get("mcpServers", {})
@@ -165,12 +171,16 @@ class MCPProvider:
                 # 连接失败不阻塞其他 server
                 logger.error(
                     "Failed to connect to MCP server '%s': %s\n%s",
-                    config.server, e, traceback.format_exc(),
+                    config.server,
+                    e,
+                    traceback.format_exc(),
                 )
 
         return all_tools
 
-    async def call_tool(self, server: str, tool_name: str, params: dict[str, Any]) -> RunResult:
+    async def call_tool(
+        self, server: str, tool_name: str, params: dict[str, Any]
+    ) -> RunResult:
         """路由到对应 MCP server 执行工具。"""
         conn = self._connections.get(server)
         if not conn:
@@ -285,11 +295,15 @@ def load_native_tool_modules(config_path: Path = DEFAULT_CONFIG_PATH) -> None:
         except Exception as e:
             logger.error(
                 "Failed to load native tool '%s': %s\n%s",
-                entry, e, traceback.format_exc(),
+                entry,
+                e,
+                traceback.format_exc(),
             )
 
 
-def load_mcp_tools_sync(config_path: Path = DEFAULT_CONFIG_PATH) -> tuple[MCPProvider, list[ToolMeta]]:
+def load_mcp_tools_sync(
+    config_path: Path = DEFAULT_CONFIG_PATH,
+) -> tuple[MCPProvider, list[ToolMeta]]:
     """同步包装：加载配置并连接所有 MCP server。"""
     provider = MCPProvider()
     configs = provider.load_config(config_path)

@@ -6,11 +6,11 @@ import logging
 import traceback
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from axi.models import RunResult, ToolSource
 from axi.providers.native import get_native_function
 from axi.registry import Registry
+
+logger = logging.getLogger(__name__)
 
 
 class Executor:
@@ -26,7 +26,9 @@ class Executor:
             return RunResult.fail(f"Tool not found: {full_name}")
 
         if meta.source != ToolSource.NATIVE:
-            return RunResult.fail(f"Non-native tool should be executed via daemon: {full_name}")
+            return RunResult.fail(
+                f"Non-native tool should be executed via daemon: {full_name}"
+            )
 
         func = get_native_function(meta.name)
         if not func:

@@ -16,8 +16,8 @@ PID_PATH = os.path.join(SOCKET_DIR, "daemon.pid")
 class DaemonRequest(BaseModel):
     """daemon 请求。"""
 
-    method: Literal["list_tools", "call_tool", "search", "describe", "shutdown"] = Field(
-        description="方法名"
+    method: Literal["list_tools", "call_tool", "search", "describe", "shutdown"] = (
+        Field(description="方法名")
     )
     tool_name: str | None = Field(default=None, description="工具完整名称")
     params: dict[str, Any] | None = Field(default=None, description="调用参数")

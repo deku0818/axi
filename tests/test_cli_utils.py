@@ -47,7 +47,9 @@ class TestParseParams:
 
 class TestExtractOption:
     def test_extract_long_option(self):
-        value, remaining = _extract_option(["--json", '{"a":1}', "--verbose"], "--json", "-j")
+        value, remaining = _extract_option(
+            ["--json", '{"a":1}', "--verbose"], "--json", "-j"
+        )
         assert value == '{"a":1}'
         assert remaining == ["--verbose"]
 
@@ -67,7 +69,9 @@ class TestExtractOption:
 
 class TestMCPServerConfig:
     def test_missing_command_and_url_rejected(self):
-        with pytest.raises(ValidationError, match="must have either 'command' or 'url'"):
+        with pytest.raises(
+            ValidationError, match="must have either 'command' or 'url'"
+        ):
             MCPServerConfig(server="test")
 
     def test_command_only_ok(self):
