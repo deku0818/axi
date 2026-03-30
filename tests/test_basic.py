@@ -1,5 +1,9 @@
 """基础端到端测试。"""
 
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, Field
+
 from axi import tool
 from axi.cli import get_registry, get_executor
 
@@ -70,3 +74,72 @@ def test_describe():
     assert meta is not None
     assert meta.input_schema["required"] == ["name"]
     assert meta.input_schema["properties"]["greeting"]["default"] == "Hello"
+
+
+# ---- Schema 提取：高级类型 ----
+
+
+@tool(name="query_orders", description="按区域查询订单")
+def query_orders(
+    region: Annotated[Literal["cn", "jp"], Field(description="地区只能支持中国和日本")],
+    keywords: list[str] = [],
+    limit: int = 10,
+) -> dict:
+    return {"region": region, "keywords": keywords, "limit": limit}
+
+
+class FilterConfig(BaseModel):
+    min_price: float
+    max_price: float = 9999.0
+
+
+@tool(name="search_products", description="搜索商品")
+def search_products(
+    query: str,
+    filter: FilterConfig | None = None,
+    page: Annotated[int, Field(ge=1, le=100, description="页码")] = 1,
+) -> dict:
+    return {"query": query}
+
+
+def test_schema_literal_with_description():
+    """Literal 枚举 + Field description。"""
+    meta = get_registry().get("query_orders")
+    region = meta.input_schema["properties"]["region"]
+    assert region["enum"] == ["cn", "jp"]
+    assert region["description"] == "地区只能支持中国和日本"
+
+
+def test_schema_typed_list():
+    """list[str] → array with items。"""
+    meta = get_registry().get("query_orders")
+    kw = meta.input_schema["properties"]["keywords"]
+    assert kw["type"] == "array"
+    assert kw["items"] == {"type": "string"}
+
+
+def test_schema_optional_default():
+    """带默认值的参数不在 required 中。"""
+    meta = get_registry().get("query_orders")
+    assert "region" in meta.input_schema["required"]
+    assert "keywords" not in meta.input_schema.get("required", [])
+    assert "limit" not in meta.input_schema.get("required", [])
+
+
+def test_schema_nested_model():
+    """Pydantic BaseModel 作为参数类型 → 嵌套 object schema。"""
+    meta = get_registry().get("search_products")
+    schema = meta.input_schema
+    # filter 可以是 FilterConfig 或 None
+    # 检查 FilterConfig 的属性被正确展开
+    assert "query" in schema["properties"]
+    assert "filter" in schema["properties"]
+
+
+def test_schema_field_constraints():
+    """Field(ge=1, le=100) → minimum / maximum。"""
+    meta = get_registry().get("search_products")
+    page = meta.input_schema["properties"]["page"]
+    assert page.get("minimum") == 1
+    assert page.get("maximum") == 100
+    assert page.get("description") == "页码"

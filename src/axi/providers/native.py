@@ -3,6 +3,8 @@
 import inspect
 from typing import Any, Callable, get_type_hints
 
+from pydantic import create_model
+
 from axi.models import ToolMeta, ToolSource
 
 # 全局注册表，存储原生工具的函数引用
@@ -10,44 +12,30 @@ _native_functions: dict[str, Callable] = {}
 
 
 def _extract_input_schema(func: Callable) -> dict[str, Any]:
-    """从函数签名和 type hints 提取 JSON Schema。"""
-    hints = get_type_hints(func)
-    sig = inspect.signature(func)
-    properties: dict[str, Any] = {}
-    required: list[str] = []
+    """从函数签名和 type hints 提取 JSON Schema。
 
-    type_map = {
-        str: "string",
-        int: "integer",
-        float: "number",
-        bool: "boolean",
-        list: "array",
-        dict: "object",
-    }
+    利用 Pydantic 的 create_model 动态构建模型，
+    自动支持 Literal、Optional、list[T]、嵌套 BaseModel、Annotated[..., Field()] 等。
+    """
+    hints = get_type_hints(func, include_extras=True)
+    sig = inspect.signature(func)
+    fields: dict[str, Any] = {}
 
     for name, param in sig.parameters.items():
-        if name == "return":
-            continue
-
-        prop: dict[str, Any] = {}
-        hint = hints.get(name)
-        if hint and hint in type_map:
-            prop["type"] = type_map[hint]
-
-        # 用参数默认值判断 required
+        hint = hints.get(name, Any)
         if param.default is inspect.Parameter.empty:
-            required.append(name)
+            fields[name] = (hint, ...)
         else:
-            prop["default"] = param.default
+            fields[name] = (hint, param.default)
 
-        properties[name] = prop
+    model = create_model(func.__name__, **fields)
+    schema = model.model_json_schema()
 
-    schema: dict[str, Any] = {
-        "type": "object",
-        "properties": properties,
-    }
-    if required:
-        schema["required"] = required
+    # 移除 Pydantic 自动添加的 title 字段，保持输出紧凑
+    schema.pop("title", None)
+    for prop in schema.get("properties", {}).values():
+        prop.pop("title", None)
+
     return schema
 
 
