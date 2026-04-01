@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import threading
-import traceback
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any, Self
@@ -14,36 +13,22 @@ from typing import Any, Self
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 
+from axi.config import (
+    MCPServerConfig as MCPServerBaseConfig,
+    NativeToolEntry,
+    app_config,
+)
 from axi.models import RunResult, ToolMeta, ToolSource
 
 logger = logging.getLogger(__name__)
 
-# 配置文件默认路径
-DEFAULT_CONFIG_PATH = Path("axi.json")
 
-
-def load_axi_config(config_path: Path = DEFAULT_CONFIG_PATH) -> dict:
-    """读取并解析 axi.json，返回原始 dict。找不到文件则返回空 dict。"""
-    if not config_path.exists():
-        return {}
-    with open(config_path) as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError as e:
-            logger.error("Malformed config file %s: %s", config_path, e)
-            return {}
-
-
-class MCPServerConfig(BaseModel):
-    """单个 MCP server 的配置。"""
+class MCPServerConfig(MCPServerBaseConfig):
+    """运行时 MCP server 配置，增加 server 名称和 transport 校验。"""
 
     server: str = Field(min_length=1)
-    command: str | None = None
-    args: list[str] = Field(default_factory=list)
-    env: dict[str, str] | None = None
-    url: str | None = None
 
     @model_validator(mode="after")
     def _validate_transport(self) -> Self:
@@ -142,19 +127,12 @@ class MCPProvider:
     def __init__(self) -> None:
         self._connections: dict[str, MCPConnection] = {}
 
-    def load_config(
-        self, config_path: Path = DEFAULT_CONFIG_PATH
-    ) -> list[MCPServerConfig]:
-        """读取 axi.json 中的 mcpServers 配置。"""
-        raw = load_axi_config(config_path)
-        mcp_servers = raw.get("mcpServers", {})
-
-        configs = []
-        for server_name, server_dict in mcp_servers.items():
-            configs.append(
-                MCPServerConfig.model_validate({"server": server_name, **server_dict})
-            )
-        return configs
+    def load_config(self) -> list[MCPServerConfig]:
+        """从全局配置中读取 mcpServers。"""
+        return [
+            MCPServerConfig(server=name, **cfg.model_dump())
+            for name, cfg in app_config.mcp_servers.items()
+        ]
 
     async def connect_all(self, configs: list[MCPServerConfig]) -> list[ToolMeta]:
         """连接所有 MCP server，返回所有工具元数据。"""
@@ -167,21 +145,16 @@ class MCPProvider:
                 tools = await conn.list_tools()
                 self._connections[config.server] = conn
                 all_tools.extend(tools)
-            except Exception as e:
+            except Exception:
                 # 连接失败不阻塞其他 server
-                logger.error(
-                    "Failed to connect to MCP server '%s': %s\n%s",
-                    config.server,
-                    e,
-                    traceback.format_exc(),
-                )
+                logger.exception("Failed to connect to MCP server '%s'", config.server)
 
         return all_tools
 
     async def call_tool(
         self, server: str, tool_name: str, params: dict[str, Any]
     ) -> RunResult:
-        """路由到对应 MCP server 执行工具。"""
+        """路由到对应 MCP server 执行工具。失败时尝试重连一次。"""
         conn = self._connections.get(server)
         if not conn:
             return RunResult.fail(f"MCP server not connected: {server}")
@@ -190,8 +163,23 @@ class MCPProvider:
             result = await conn.call_tool(tool_name, params)
             return RunResult.success(result)
         except Exception as e:
-            logger.debug("MCP tool call error:\n%s", traceback.format_exc())
-            return RunResult.fail(f"{type(e).__name__}: {e}")
+            logger.warning(
+                "Tool call '%s/%s' failed, attempting reconnect: %s",
+                server,
+                tool_name,
+                e,
+            )
+            try:
+                await conn.close()
+                await conn.connect()
+                result = await conn.call_tool(tool_name, params)
+                logger.info("Reconnect to '%s' succeeded", server)
+                return RunResult.success(result)
+            except Exception as retry_err:
+                logger.exception("Reconnect to '%s' failed", server)
+                return RunResult.fail(
+                    f"Tool call failed and reconnect failed: {retry_err}"
+                )
 
     async def close_all(self) -> None:
         """关闭所有连接。"""
@@ -245,29 +233,18 @@ def _import_from_file(file_path: str) -> None:
     spec.loader.exec_module(module)
 
 
-def _parse_native_entry(entry: dict) -> tuple[str, str]:
-    """解析 nativeTools 条目，返回 (module_or_path, server_name)。
-
-    格式：{"module": "...", "name": "..."}
-    - module: 模块路径或 .py 文件路径（必填）
-    - name: server 名称（可选，默认从 module 推导）
-    """
-    module = entry["module"]
-    name = entry.get("name")
-
-    if name is None:
-        if module.endswith(".py"):
-            name = Path(module).stem
-        else:
-            name = module.rsplit(".", 1)[-1]
-
-    return module, name
+def _resolve_server_name(entry: NativeToolEntry) -> str:
+    """推导 native tool 的 server 名称。"""
+    if entry.name is not None:
+        return entry.name
+    if entry.module.endswith(".py"):
+        return Path(entry.module).stem
+    return entry.module.rsplit(".", 1)[-1]
 
 
-def load_native_tool_modules(config_path: Path = DEFAULT_CONFIG_PATH) -> None:
-    """从 axi.json 的 nativeTools 列表中加载模块，触发 @tool 注册。"""
-    raw = load_axi_config(config_path)
-    entries = raw.get("nativeTools", [])
+def load_native_tool_modules() -> None:
+    """从全局配置的 nativeTools 列表中加载模块，触发 @tool 注册。"""
+    entries = app_config.native_tools
     if not entries:
         return
 
@@ -277,36 +254,29 @@ def load_native_tool_modules(config_path: Path = DEFAULT_CONFIG_PATH) -> None:
 
     for entry in entries:
         try:
-            module, server_name = _parse_native_entry(entry)
+            server_name = _resolve_server_name(entry)
 
             # 记录导入前已有的工具
             before = set(registry.list_names())
 
-            if module.endswith(".py"):
-                _import_from_file(module)
+            if entry.module.endswith(".py"):
+                _import_from_file(entry.module)
             else:
-                importlib.import_module(module)
+                importlib.import_module(entry.module)
 
             # 为新增的工具设置 server
             new_names = [k for k in registry.list_names() if k not in before]
             for name in new_names:
                 registry.set_server(name, server_name)
 
-        except Exception as e:
-            logger.error(
-                "Failed to load native tool '%s': %s\n%s",
-                entry,
-                e,
-                traceback.format_exc(),
-            )
+        except Exception:
+            logger.exception("Failed to load native tool '%s'", entry)
 
 
-def load_mcp_tools_sync(
-    config_path: Path = DEFAULT_CONFIG_PATH,
-) -> tuple[MCPProvider, list[ToolMeta]]:
+def load_mcp_tools_sync() -> tuple[MCPProvider, list[ToolMeta]]:
     """同步包装：加载配置并连接所有 MCP server。"""
     provider = MCPProvider()
-    configs = provider.load_config(config_path)
+    configs = provider.load_config()
     if not configs:
         return provider, []
 

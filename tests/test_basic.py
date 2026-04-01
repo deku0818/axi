@@ -57,7 +57,7 @@ def test_search_substring():
 
 def test_search_regex():
     registry = get_registry()
-    results = registry.search("add_.*", regex=True)
+    results = registry.grep("add_.*")
     assert len(results) > 0
     assert results[0].name == "add_numbers"
 

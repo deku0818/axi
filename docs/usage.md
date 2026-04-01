@@ -15,7 +15,7 @@ axi list jina-mcp-tools
 axi search "网页抓取"
 
 # 搜索工具（正则）
-axi search --regex "read_.*"
+axi grep "read_.*"
 
 # 查看工具详情（input_schema、description，原生工具可能包含 output_example）
 axi describe jina-mcp-tools/read_url

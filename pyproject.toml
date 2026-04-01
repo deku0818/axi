@@ -1,10 +1,14 @@
 [project]
 name = "axi"
-version = "0.0.2"
+version = "0.0.3"
 description = "Agent eXecution Interface - unified tool layer for AI Agents"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "bm25s>=0.3.3",
+    "jieba>=0.42.1",
+    "langchain-community>=0.4.1",
+    "langchain-openai>=1.1.12",
     "mcp>=1.26.0",
     "pydantic>=2.12.5",
     "typer>=0.24.1",

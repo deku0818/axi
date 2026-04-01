@@ -2,16 +2,17 @@
 
 import json
 import logging
-from pathlib import Path
+from collections import Counter
 
 import typer
 from pydantic import BaseModel
 
+from axi.config import app_config
 from axi.daemon.client import ensure_daemon, is_daemon_running, send_request
-from axi.daemon.protocol import PID_PATH, DaemonRequest, DaemonResponse
+from axi.daemon.protocol import DaemonRequest, DaemonResponse
 from axi.executor import Executor
-from axi.models import RunResult
-from axi.registry import Registry, ToolResolveError
+from axi.models import RunResult, SearchResult
+from axi.registry import AmbiguousToolError, Registry, ToolNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ app = typer.Typer(
     name="axi",
     help="Agent eXecution Interface - unified tool layer for AI Agents",
     no_args_is_help=True,
+    rich_markup_mode="rich" if app_config.cli.rich else None,
 )
 
 daemon_app = typer.Typer(help="管理 axi daemon")
@@ -32,9 +34,9 @@ _executor = Executor(_registry)
 @app.callback(invoke_without_command=True)
 def main_callback(ctx: typer.Context) -> None:
     """CLI 启动时加载 axi.json 中配置的原生工具模块。"""
-    from axi.providers.mcp import DEFAULT_CONFIG_PATH, load_native_tool_modules
+    from axi.providers.mcp import load_native_tool_modules
 
-    load_native_tool_modules(DEFAULT_CONFIG_PATH)
+    load_native_tool_modules()
     if ctx.invoked_subcommand is None:
         raise typer.Exit()
 
@@ -74,15 +76,13 @@ def _daemon_request(req: DaemonRequest) -> DaemonResponse:
 
 
 @daemon_app.command("start")
-def daemon_start(
-    config: str = typer.Option("axi.json", "--config", "-c", help="配置文件路径"),
-) -> None:
+def daemon_start() -> None:
     """启动 daemon。"""
     if is_daemon_running():
         typer.echo("Daemon is already running.")
         return
 
-    if ensure_daemon(config):
+    if ensure_daemon():
         typer.echo("Daemon started.")
     else:
         typer.echo("Failed to start daemon.")
@@ -110,44 +110,76 @@ def daemon_stop() -> None:
 @daemon_app.command("status")
 def daemon_status() -> None:
     """查看 daemon 状态。"""
-    if is_daemon_running():
-        try:
-            with open(PID_PATH) as f:
-                pid = f.read().strip()
-            typer.echo(f"Daemon is running (PID: {pid})")
-        except FileNotFoundError:
-            typer.echo("Daemon is not running.")
-    else:
-        typer.echo("Daemon is not running.")
+    if not is_daemon_running():
+        _output_json({"status": "stopped"})
+        return
+
+    resp = send_request(DaemonRequest(method="status"))
+    if resp.status == "error":
+        _output_json({"status": "error", "error": resp.error})
+        raise typer.Exit(code=1)
+
+    data = resp.data
+    # 原生工具按 server 统计
+    native_server_tools = dict(
+        Counter(meta.server or "unknown" for meta in _registry.list_all())
+    )
+
+    result = {
+        "status": "running",
+        **data,
+        "native_tools": native_server_tools,
+    }
+    _output_json(result)
 
 
 # ── 核心命令 ──────────────────────────────────────────────
 
 
-@app.command()
-def search(
-    query: str = typer.Argument(help="搜索关键词或正则表达式"),
-    regex: bool = typer.Option(False, "--regex", "-r", help="使用正则匹配"),
-    top_k: int = typer.Option(10, "--top-k", "-k", help="返回结果数量"),
+def _search_and_merge(
+    local_results: list[SearchResult],
+    daemon_method: str,
+    query: str,
+    top_k: int,
 ) -> None:
-    """搜索工具。"""
-    try:
-        local_results = _registry.search(query, regex=regex, top_k=top_k)
-    except ValueError as e:
-        _output_json({"error": str(e)})
-        raise typer.Exit(code=1)
-
-    mcp_results = []
+    """执行 daemon 搜索，合并本地和远程结果后输出 JSON。"""
+    mcp_results: list[dict] = []
     resp = _daemon_request(
-        DaemonRequest(method="search", query=query, regex=regex, top_k=top_k)
+        DaemonRequest(method=daemon_method, query=query, top_k=top_k)
     )
     if resp.status == "success" and resp.data:
         mcp_results = resp.data
+    elif resp.status == "error":
+        logger.warning("Daemon search failed: %s", resp.error)
 
     combined = [r.model_dump(exclude_none=True) for r in local_results] + (
         mcp_results or []
     )
     typer.echo(json.dumps(combined, ensure_ascii=False))
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(help="搜索关键词"),
+    top_k: int = typer.Option(5, "--top-k", "-k", help="返回结果数量"),
+) -> None:
+    """混合搜索工具（BM25 + Embedding）。"""
+    local_results = _registry.search(query, top_k=top_k)
+    _search_and_merge(local_results, "search", query, top_k)
+
+
+@app.command()
+def grep(
+    pattern: str = typer.Argument(help="正则表达式"),
+    limit: int = typer.Option(10, "--limit", "-l", help="返回结果数量"),
+) -> None:
+    """正则表达式搜索工具。"""
+    try:
+        local_results = _registry.grep(pattern, top_k=limit)
+    except ValueError as e:
+        _output_json({"error": str(e)})
+        raise typer.Exit(code=1)
+    _search_and_merge(local_results, "grep", pattern, limit)
 
 
 def _collect_tool_groups() -> dict[str | None, list[dict]]:
@@ -174,12 +206,10 @@ def _collect_tool_groups() -> dict[str | None, list[dict]]:
 
     # daemon 未返回工具时，至少从配置列出 server
     if not mcp_tools:
-        config_path = Path("axi.json")
-        if config_path.exists():
-            provider = MCPProvider()
-            for cfg in provider.load_config(config_path):
-                if cfg.server not in groups:
-                    groups[cfg.server] = []
+        provider = MCPProvider()
+        for cfg in provider.load_config():
+            if cfg.server not in groups:
+                groups[cfg.server] = []
 
     return groups
 
@@ -235,9 +265,10 @@ def _resolve_tool(name: str) -> dict:
     try:
         meta = _registry.resolve(name)
         return meta.model_dump(exclude_none=True)
-    except ToolResolveError as e:
-        if "Ambiguous" in str(e):
-            return {"error": str(e)}
+    except AmbiguousToolError as e:
+        return {"error": str(e)}
+    except ToolNotFoundError:
+        pass  # 本地未找到，继续尝试 daemon
 
     resp = _daemon_request(DaemonRequest(method="describe", tool_name=name))
     if resp.status == "success":
@@ -292,11 +323,11 @@ def run(
         result = _executor.run(meta.full_name, parsed)
         _output_json(result)
         return
-    except ToolResolveError as e:
-        # 如果是歧义错误，直接报错；否则继续尝试 daemon
-        if "Ambiguous" in str(e):
-            _output_json({"error": str(e)})
-            raise typer.Exit(code=1)
+    except AmbiguousToolError as e:
+        _output_json({"error": str(e)})
+        raise typer.Exit(code=1)
+    except ToolNotFoundError:
+        pass  # 本地未找到，继续尝试 daemon
 
     resp = _daemon_request(
         DaemonRequest(method="call_tool", tool_name=tool_name, params=parsed)

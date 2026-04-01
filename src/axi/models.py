@@ -17,7 +17,9 @@ class ToolMeta(BaseModel):
     """工具元数据，Registry 中的核心单元。"""
 
     name: str = Field(min_length=1, description="工具名称")
-    server: str | None = Field(default=None, description="所属 MCP server 名称")
+    server: str | None = Field(
+        default=None, description="所属 server 名称（MCP server 或原生工具模块名）"
+    )
     description: str = Field(description="工具描述")
     input_schema: dict[str, Any] = Field(
         default_factory=dict, description="输入参数 JSON Schema"
@@ -69,3 +71,4 @@ class SearchResult(BaseModel):
     name: str = Field(description="工具完整名称")
     description: str = Field(description="工具描述")
     source: ToolSource = Field(description="工具来源")
+    score: float | None = Field(default=None, description="相关性分数")

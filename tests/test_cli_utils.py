@@ -6,7 +6,8 @@ import pytest
 from pydantic import ValidationError
 
 from axi.cli import _parse_params, _extract_option
-from axi.providers.mcp import MCPServerConfig, load_axi_config
+from axi.config import AxiConfig, load_config
+from axi.providers.mcp import MCPServerConfig
 
 
 # ── _parse_params ──────────────────────────────────────────
@@ -87,22 +88,22 @@ class TestMCPServerConfig:
             MCPServerConfig(server="", command="python")
 
 
-# ── load_axi_config ──────────────────────────────────────
+# ── load_config ──────────────────────────────────────
 
 
 class TestLoadAxiConfig:
-    def test_missing_file_returns_empty(self, tmp_path):
-        result = load_axi_config(tmp_path / "nonexistent.json")
-        assert result == {}
+    def test_missing_file_returns_default(self, tmp_path):
+        result = load_config(tmp_path / "nonexistent.json")
+        assert result == AxiConfig()
 
-    def test_malformed_json_returns_empty(self, tmp_path):
+    def test_malformed_json_raises_system_exit(self, tmp_path):
         bad_file = tmp_path / "bad.json"
         bad_file.write_text("{invalid json")
-        result = load_axi_config(bad_file)
-        assert result == {}
+        with pytest.raises(SystemExit, match="Malformed config file"):
+            load_config(bad_file)
 
     def test_valid_json(self, tmp_path):
         good_file = tmp_path / "axi.json"
         good_file.write_text(json.dumps({"mcpServers": {}}))
-        result = load_axi_config(good_file)
-        assert result == {"mcpServers": {}}
+        result = load_config(good_file)
+        assert result.mcp_servers == {}

@@ -4,36 +4,61 @@ import asyncio
 import logging
 import os
 import signal
-import sys
-from pathlib import Path
+import time
+from collections import Counter
 
+from axi.config import app_config
 from axi.daemon.protocol import (
     SOCKET_DIR,
     SOCKET_PATH,
     PID_PATH,
     DaemonRequest,
     DaemonResponse,
+    DaemonStatus,
 )
 from axi.models import ToolSource
 from axi.providers.mcp import MCPProvider
 from axi.registry import Registry, ToolResolveError
+from axi.search.cache import EmbeddingCache
+from axi.search.embedding import create_embedding_provider
 
 logger = logging.getLogger(__name__)
+
+_IDLE_EXEMPT_METHODS = frozenset({"status", "shutdown"})
 
 
 class DaemonServer:
     """axi daemon 主体。"""
 
-    def __init__(self, config_path: Path) -> None:
-        self.config_path = config_path
-        self.registry = Registry()
+    def __init__(self) -> None:
         self.mcp_provider = MCPProvider()
         self._server: asyncio.Server | None = None
+        self._start_time: float = time.monotonic()
+        self._last_activity: float = time.monotonic()
+        self._watchdog_task: asyncio.Task | None = None
+
+        # 根据配置初始化搜索
+        search_cfg = app_config.search
+        embedding_cfg = search_cfg.embedding
+        embedding_provider = create_embedding_provider(embedding_cfg)
+        embedding_cache = EmbeddingCache() if embedding_provider else None
+
+        self._idle_timeout: float = app_config.daemon.idle_timeout_minutes * 60
+
+        self.registry = Registry(
+            embedding_provider=embedding_provider,
+            embedding_cache=embedding_cache,
+            weight_bm25=search_cfg.weights.bm25,
+            weight_embedding=search_cfg.weights.embedding,
+        )
 
     async def start(self) -> None:
         """启动 daemon：连接 MCP server，监听 Unix socket。"""
+        self._start_time = time.monotonic()
+        self._last_activity = time.monotonic()
+
         # 加载并连接 MCP servers
-        configs = self.mcp_provider.load_config(self.config_path)
+        configs = self.mcp_provider.load_config()
         if configs:
             tools = await self.mcp_provider.connect_all(configs)
             for tool_meta in tools:
@@ -58,7 +83,14 @@ class DaemonServer:
             self._handle_client, path=SOCKET_PATH
         )
 
-        logger.info("Daemon listening on %s", SOCKET_PATH)
+        logger.info(
+            "Daemon listening on %s (idle timeout: %ds)",
+            SOCKET_PATH,
+            int(self._idle_timeout),
+        )
+
+        # 启动 idle watchdog
+        self._watchdog_task = asyncio.create_task(self._idle_watchdog())
 
         # 注册信号处理
         loop = asyncio.get_event_loop()
@@ -72,9 +104,23 @@ class DaemonServer:
         async with self._server:
             await self._server.serve_forever()
 
+    async def _idle_watchdog(self) -> None:
+        """定期检查 idle 状态，超时则自动关闭 daemon。"""
+        while True:
+            await asyncio.sleep(60)
+            idle = time.monotonic() - self._last_activity
+            if idle > self._idle_timeout:
+                logger.info("Idle timeout reached (%.0fs), shutting down", idle)
+                await self.stop()
+                break
+
     async def stop(self) -> None:
         """停止 daemon。"""
         logger.info("Shutting down daemon...")
+
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+
         await self.mcp_provider.close_all()
 
         if self._server:
@@ -95,10 +141,15 @@ class DaemonServer:
                 if not line:
                     break
 
+                req = None
                 try:
                     req = DaemonRequest.model_validate_json(line)
+                    if req.method not in _IDLE_EXEMPT_METHODS:
+                        self._last_activity = time.monotonic()
                     resp = await self._dispatch(req)
                 except Exception as e:
+                    method = req.method if req else "<invalid>"
+                    logger.exception("Error processing request: %s", method)
                     resp = DaemonResponse.fail(f"{type(e).__name__}: {e}")
 
                 writer.write(resp.model_dump_json().encode() + b"\n")
@@ -120,9 +171,13 @@ class DaemonServer:
         return DaemonResponse.success([t.model_dump(exclude_none=True) for t in tools])
 
     async def _handle_search(self, req: DaemonRequest) -> DaemonResponse:
-        results = self.registry.search(
-            req.query or "", regex=req.regex, top_k=req.top_k
+        results = self.registry.search(req.query or "", top_k=req.top_k)
+        return DaemonResponse.success(
+            [r.model_dump(exclude_none=True) for r in results]
         )
+
+    async def _handle_grep(self, req: DaemonRequest) -> DaemonResponse:
+        results = self.registry.grep(req.query or "", top_k=req.top_k)
         return DaemonResponse.success(
             [r.model_dump(exclude_none=True) for r in results]
         )
@@ -162,16 +217,39 @@ class DaemonServer:
         asyncio.create_task(self.stop())
         return DaemonResponse.success("Daemon shutting down")
 
+    async def _handle_status(self, req: DaemonRequest) -> DaemonResponse:
+        now = time.monotonic()
+        uptime = now - self._start_time
+        idle = now - self._last_activity
+        idle_remaining = max(0.0, self._idle_timeout - idle)
+
+        # 按 server 统计工具数量
+        server_tools = dict(
+            Counter(t.server or "unknown" for t in self.registry.list_all())
+        )
+
+        status = DaemonStatus(
+            pid=os.getpid(),
+            uptime_seconds=int(uptime),
+            idle_seconds=int(idle),
+            idle_timeout_seconds=int(self._idle_timeout),
+            idle_remaining_seconds=int(idle_remaining),
+            server_tools=server_tools,
+        )
+        return DaemonResponse.success(status.model_dump())
+
     _HANDLERS = {
         "list_tools": _handle_list_tools,
         "search": _handle_search,
+        "grep": _handle_grep,
         "describe": _handle_describe,
         "call_tool": _handle_call_tool,
         "shutdown": _handle_shutdown,
+        "status": _handle_status,
     }
 
 
-def run_daemon(config_path: str = "axi.json") -> None:
+def run_daemon() -> None:
     """启动 daemon 进程。"""
     axi_logger = logging.getLogger("axi")
     axi_logger.setLevel(logging.DEBUG)
@@ -180,10 +258,9 @@ def run_daemon(config_path: str = "axi.json") -> None:
         logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     )
     axi_logger.addHandler(handler)
-    server = DaemonServer(Path(config_path))
+    server = DaemonServer()
     asyncio.run(server.start())
 
 
 if __name__ == "__main__":
-    config = sys.argv[1] if len(sys.argv) > 1 else "axi.json"
-    run_daemon(config)
+    run_daemon()

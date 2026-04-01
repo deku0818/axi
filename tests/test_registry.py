@@ -3,7 +3,12 @@
 import pytest
 
 from axi.models import ToolMeta, ToolSource
-from axi.registry import Registry, ToolResolveError
+from axi.registry import (
+    AmbiguousToolError,
+    Registry,
+    ToolNotFoundError,
+    ToolResolveError,
+)
 
 
 @pytest.fixture
@@ -46,7 +51,7 @@ class TestResolve:
         assert meta.server == "server-a"
 
     def test_resolve_full_name_not_found(self, registry):
-        with pytest.raises(ToolResolveError, match="Tool not found"):
+        with pytest.raises(ToolNotFoundError, match="Tool not found"):
             registry.resolve("server-x/echo")
 
     def test_resolve_unique_short_name(self, registry):
@@ -55,12 +60,19 @@ class TestResolve:
         assert meta.server == "server-a"
 
     def test_resolve_ambiguous_short_name(self, registry):
-        with pytest.raises(ToolResolveError, match="Ambiguous"):
+        with pytest.raises(AmbiguousToolError, match="Ambiguous"):
             registry.resolve("echo")
 
     def test_resolve_short_name_not_found(self, registry):
-        with pytest.raises(ToolResolveError, match="Tool not found"):
+        with pytest.raises(ToolNotFoundError, match="Tool not found"):
             registry.resolve("nonexistent")
+
+    def test_subclasses_catchable_as_base(self, registry):
+        """ToolNotFoundError 和 AmbiguousToolError 都可作为 ToolResolveError 捕获。"""
+        with pytest.raises(ToolResolveError):
+            registry.resolve("nonexistent")
+        with pytest.raises(ToolResolveError):
+            registry.resolve("echo")
 
 
 # ── set_server / list_names ──────────────────────────────
@@ -99,10 +111,10 @@ class TestRegistryMethods:
 class TestSearchErrors:
     def test_invalid_regex_raises_value_error(self, registry):
         with pytest.raises(ValueError, match="Invalid regex pattern"):
-            registry.search("[invalid", regex=True)
+            registry.grep("[invalid")
 
     def test_valid_regex_search(self, registry):
-        results = registry.search("echo", regex=True)
+        results = registry.grep("echo")
         assert len(results) == 2
 
     def test_substring_search(self, registry):

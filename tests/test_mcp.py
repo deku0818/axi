@@ -1,6 +1,5 @@
 """MCP Provider 集成测试。"""
 
-import json
 import sys
 from pathlib import Path
 
@@ -67,24 +66,24 @@ async def test_mcp_provider_connect_all(mock_config):
         await provider.close_all()
 
 
-def test_mcp_load_config(tmp_path):
-    config_file = tmp_path / "axi.json"
-    config_file.write_text(
-        json.dumps(
-            {
-                "mcpServers": {
-                    "my-server": {
-                        "command": "python",
-                        "args": ["server.py"],
-                        "env": {"API_KEY": "xxx"},
-                    }
+def test_mcp_load_config(monkeypatch):
+    from axi.config import AxiConfig
+
+    mock_config = AxiConfig.model_validate(
+        {
+            "mcpServers": {
+                "my-server": {
+                    "command": "python",
+                    "args": ["server.py"],
+                    "env": {"API_KEY": "xxx"},
                 }
             }
-        )
+        }
     )
+    monkeypatch.setattr("axi.providers.mcp.app_config", mock_config)
 
     provider = MCPProvider()
-    configs = provider.load_config(config_file)
+    configs = provider.load_config()
     assert len(configs) == 1
     assert configs[0].server == "my-server"
     assert configs[0].command == "python"

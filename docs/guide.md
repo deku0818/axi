@@ -65,32 +65,63 @@ axi list jina-mcp-tools
 
 ### axi search
 
-搜索已注册的工具。返回匹配工具的名称、描述和来源。
+搜索已注册的工具。默认使用 BM25 关键词搜索（bm25s + jieba 分词），支持中英文自然语言查询。如果在 `axi.json` 中配置了 Embedding，则自动启用混合搜索（BM25 + Embedding，通过 RRF 融合排序）。返回匹配工具的名称、描述、来源和相关性分数。
 
 ```bash
-# 子串匹配（默认）
+# BM25 关键词搜索（默认）
 axi search "读取"
 
 # 正则匹配
-axi search --regex "read_.*"
+axi grep "read_.*"
 
 # 限制返回数量
 axi search "web" --top-k 5
 ```
 
-**参数：**
+**search 参数：**
 
 | 参数 | 缩写 | 说明 | 默认值 |
 |------|------|------|--------|
 | `query` | - | 搜索关键词（位置参数） | 必填 |
-| `--regex` | `-r` | 使用正则表达式匹配 | false |
+| `--top-k` | `-k` | 返回结果数量 | 10 |
+
+**grep 参数：**
+
+| 参数 | 缩写 | 说明 | 默认值 |
+|------|------|------|--------|
+| `pattern` | - | 正则表达式（位置参数） | 必填 |
 | `--top-k` | `-k` | 返回结果数量 | 10 |
 
 **输出示例：**
 
 ```json
-[{"name":"jina-mcp-tools/jina_reader","description":"Read and extract content from web page.","source":"mcp"}]
+[{"name":"jina-mcp-tools/jina_reader","description":"Read and extract content from web page.","source":"mcp","score":0.82}]
 ```
+
+**Embedding 搜索配置：**
+
+在 `axi.json` 中添加 `search.embedding` 字段即可启用混合搜索：
+
+```json
+{
+    "mcpServers": { ... },
+    "search": {
+        "embedding": {
+            "provider": "jina",
+            "apiKey": "jina_xxx",
+            "model": "jina-embeddings-v3",
+            "baseUrl": "https://api.jina.ai/v1"
+        }
+    }
+}
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `provider` | 是 | Embedding 提供商（`jina` / `openai`） |
+| `apiKey` | 否 | API 密钥，省略时从环境变量读取（如 `JINA_API_KEY`、`OPENAI_API_KEY`） |
+| `model` | 否 | 模型名称，各 provider 有默认值 |
+| `baseUrl` | 否 | 自定义 API 端点 |
 
 ### axi describe
 

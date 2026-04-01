@@ -6,7 +6,6 @@ import os
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 from axi.daemon.protocol import (
     SOCKET_DIR,
@@ -19,6 +18,10 @@ from axi.daemon.protocol import (
 logger = logging.getLogger(__name__)
 
 DAEMON_LOG_PATH = os.path.join(SOCKET_DIR, "daemon.log")
+
+_DAEMON_START_POLL_RETRIES = 30
+_DAEMON_START_POLL_INTERVAL = 0.1  # seconds
+_DAEMON_REQUEST_TIMEOUT = 30  # seconds
 
 
 def is_daemon_running() -> bool:
@@ -35,27 +38,23 @@ def is_daemon_running() -> bool:
         return False
 
 
-def ensure_daemon(config_path: str = "axi.json") -> bool:
+def ensure_daemon() -> bool:
     """确保 daemon 已启动。未运行时自动启动，返回是否就绪。"""
     if is_daemon_running():
         return True
 
-    if not Path(config_path).exists():
-        logger.warning("Config file not found: %s", config_path)
-        return False
-
     os.makedirs(SOCKET_DIR, exist_ok=True)
-    log_file = open(DAEMON_LOG_PATH, "a")
 
-    subprocess.Popen(
-        [sys.executable, "-m", "axi.daemon.server", config_path],
-        stdout=log_file,
-        stderr=log_file,
-        start_new_session=True,
-    )
+    with open(DAEMON_LOG_PATH, "a") as log_file:
+        subprocess.Popen(
+            [sys.executable, "-m", "axi.daemon.server"],
+            stdout=log_file,
+            stderr=log_file,
+            start_new_session=True,
+        )
 
-    for _ in range(30):
-        time.sleep(0.1)
+    for _ in range(_DAEMON_START_POLL_RETRIES):
+        time.sleep(_DAEMON_START_POLL_INTERVAL)
         if is_daemon_running():
             return True
     logger.error("Daemon failed to start. Check log: %s", DAEMON_LOG_PATH)
@@ -79,13 +78,17 @@ async def _send(req: DaemonRequest) -> DaemonResponse:
         writer.write(req.model_dump_json().encode() + b"\n")
         await writer.drain()
 
-        line = await asyncio.wait_for(reader.readline(), timeout=30)
+        line = await asyncio.wait_for(
+            reader.readline(), timeout=_DAEMON_REQUEST_TIMEOUT
+        )
         if not line:
             return DaemonResponse.fail("Daemon connection closed unexpectedly")
 
         return DaemonResponse.model_validate_json(line)
     except asyncio.TimeoutError:
-        return DaemonResponse.fail("Daemon request timed out after 30s")
+        return DaemonResponse.fail(
+            f"Daemon request timed out after {_DAEMON_REQUEST_TIMEOUT}s"
+        )
     finally:
         writer.close()
         await writer.wait_closed()

@@ -11,6 +11,7 @@ AI Agent 与外部系统之间的统一工具层。通过 CLI 作为万能适配
 - Python 3.12+
 - 包管理：uv (pyproject.toml)
 - CLI：Typer / 数据模型：Pydantic / MCP：mcp 官方 SDK
+- 搜索：bm25s + jieba（BM25） / langchain-openai + langchain-community（Embedding）
 
 ## 设计文档
 
@@ -21,6 +22,7 @@ AI Agent 与外部系统之间的统一工具层。通过 CLI 作为万能适配
 - [docs/usage.md](docs/usage.md) — 使用方式定义（以终为始）
 - [docs/guide.md](docs/guide.md) — 完整使用指南（面向用户和 Agent）
 - [docs/tech-stack.md](docs/tech-stack.md) — 技术选型、目录结构、模块职责
+- [docs/configuration.md](docs/configuration.md) — axi.json 与环境变量配置参考
 - [docs/open-questions.md](docs/open-questions.md) — 待决策事项
 
 ## 快速参考
@@ -28,7 +30,8 @@ AI Agent 与外部系统之间的统一工具层。通过 CLI 作为万能适配
 - **设计原则**：渐进式披露（search → describe → run）
 - **工具来源**：MCP 导入（axi.json mcpServers）/ Python `@tool` 装饰器原生注册（axi.json nativeTools，对象格式 `{"module": "...", "name": "..."}`，module 支持文件路径和模块路径，name 可选自动推导）
 - **MCP 执行**：通过 daemon 长连接，支持有状态 MCP server（如 browser MCP）
-- **搜索策略**：子串匹配（默认） + 正则（未来扩展 BM25、embedding）
+- **搜索策略**：BM25（bm25s + jieba 分词，默认） + Embedding（Jina/OpenAI API，可选） + 正则（`axi grep`）；混合搜索用 RRF 融合，分数归一化到 0-1
+- **搜索配置**：`axi.json` 的 `search.embedding` 段，支持 `provider`（"jina"/"openai"）、`apiKey`（可选，不填从环境变量读 `JINA_API_KEY`/`OPENAI_API_KEY`）、`model`（可选）、`baseUrl`（可选）
 - **输出**：统一紧凑 JSON
 
 ## 代码规范
@@ -38,7 +41,7 @@ AI Agent 与外部系统之间的统一工具层。通过 CLI 作为万能适配
 ```
 src/axi/
 ├── __init__.py         # 公开 API: @tool 装饰器, tool() 函数
-├── cli.py              # Typer 入口: search / describe / run / daemon
+├── cli.py              # Typer 入口: search / grep / describe / run / daemon
 ├── registry.py         # 工具注册中心 + 搜索
 ├── executor.py         # 原生工具执行层
 ├── models.py           # Pydantic 数据模型
@@ -50,7 +53,12 @@ src/axi/
 │   ├── mcp.py          # MCP provider: 连接管理 + 工具调用
 │   └── native.py       # 原生 @tool 装饰器
 └── search/
-    └── regex.py        # 正则/子串搜索
+    ├── regex.py        # 正则搜索（grep 命令）
+    ├── tokenize.py     # 中英文混合分词（jieba）
+    ├── bm25.py         # BM25 搜索（封装 bm25s）
+    ├── embedding.py    # Embedding 搜索（Jina/OpenAI API）
+    ├── hybrid.py       # 混合搜索（BM25 + Embedding，RRF 融合）
+    └── cache.py        # Embedding 文件缓存
 ```
 
 ### 编码原则
@@ -61,7 +69,7 @@ src/axi/
 - **统一输出信封**：所有 `axi run` 结果包装为 `{"status": "success"|"error", "data": ..., "error": ...}`
 - **MCP 走 daemon**：MCP 工具一律通过 daemon 执行，不在 CLI 进程内直连
 - **原生走进程内**：`@tool` 注册的原生工具在 CLI 进程内直接执行
-- **搜索可插拔**：正则是当前实现，通过统一接口调用，未来可加 BM25、embedding
+- **搜索可插拔**：BM25 + Embedding 混合搜索为默认（`search` 命令），正则为独立的 `grep` 命令
 
 ### 命名约定
 
@@ -71,7 +79,7 @@ src/axi/
 ### 依赖管理
 
 - 使用 `uv add <package>` 添加依赖，**不要直接修改 pyproject.toml**
-- 核心依赖：typer, pydantic, mcp
+- 核心依赖：typer, pydantic, mcp, bm25s, jieba, langchain-openai, langchain-community
 - 添加新依赖前需确认必要性，保持轻量
 
 ## 开发约定

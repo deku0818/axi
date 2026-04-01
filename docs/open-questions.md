@@ -20,7 +20,7 @@
 
 ### 5. 搜索策略
 
-**已决定**：当前使用子串匹配（默认）和正则匹配。BM25 因中文分词问题暂缓，未来可引入 jieba 分词或 embedding 搜索。
+**已决定**：默认使用 BM25 关键词搜索（bm25s + jieba 分词），支持中英文。可选启用 Embedding 语义搜索（Jina/OpenAI，通过 LangChain 接入），两者通过 RRF（Reciprocal Rank Fusion）混合排序，分数归一化到 0-1。正则匹配通过独立的 `axi grep` 命令提供。搜索配置通过 `axi.json` 的 `search.embedding` 字段管理。
 
 ## 待决策
 

@@ -60,7 +60,8 @@ axi run jina/jina_search --query "hello world" --count 3
 | 命令 | 说明 |
 |------|------|
 | `axi list [server]` | 列出所有 server 及工具 |
-| `axi search <query>` | 搜索工具（支持 `--regex`、`--top-k`） |
+| `axi search <query>` | 混合搜索工具（BM25 + Embedding，支持 `--top-k`） |
+| `axi grep <pattern>` | 正则表达式搜索工具（支持 `--top-k`） |
 | `axi describe <tool>` | 查看工具完整 schema |
 | `axi run <tool> --key value` | 执行工具（也支持 `-j '{...}'` 传 JSON） |
 | `axi daemon start\|status\|stop` | 管理 daemon 进程 |

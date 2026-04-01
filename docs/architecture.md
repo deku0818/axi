@@ -49,7 +49,7 @@
 
 职责：
 - 维护工具元数据
-- 提供搜索接口（子串匹配、正则，未来可扩展 BM25、embedding）
+- 提供搜索接口（默认 BM25 关键词搜索，可选 Embedding 语义搜索，支持正则匹配）
 - 渐进式披露：search 返回摘要，describe 返回完整 schema
 
 存在两个 Registry 实例：
@@ -83,7 +83,7 @@
 
 ```
 axi
-├── search              # 搜索工具（子串 / 正则）
+├── search              # 搜索工具（BM25 / Embedding 混合 / 正则）
 ├── describe            # 查看工具完整 schema
 ├── run                 # 执行工具
 └── daemon
