@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path("axi.json")
+CONFIG_PATH = Path(os.environ.get("AXI_CONFIG", "axi.json"))
 
 
 # ── 子配置模型 ──────────────────────────────────────────────

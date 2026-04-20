@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.4] - 2026-04-20
+
+### Added
+- `AXI_CONFIG` 环境变量：自定义 `axi.json` 配置文件路径
+- GitHub Actions workflow：打 `v*` tag 时自动通过 trusted publishing 发布到 PyPI
+- `pyproject.toml` 新增 sdist 打包排除规则（`.github/`、`docs/`、`tests/`、`uv.lock` 等）
+- README 补充 daemon 自动管理、生命周期、状态输出、文件位置等完整说明
+- `docs/architecture.md` 补充 daemon 启动流程、idle watchdog、关闭流程、通信协议章节
+
+### Changed
+- 包名由 `axi` 重命名为 `axi-cli`（PyPI 发布名）
+- 安装方式从 `uv pip install -e .` 改为 `uv sync`
+
 ## [0.0.3] - 2026-04-01
 
 ### Added

@@ -43,6 +43,54 @@
 - `daemon/client.py`：CLI 侧客户端
 - `daemon/protocol.py`：JSON 行通信协议
 
+#### 自动启动
+
+CLI 执行 `search`、`describe`、`run` 等命令时，`client.py` 的 `ensure_daemon()` 会：
+1. 检查 `~/.axi/daemon.pid` 是否存在且进程存活
+2. 若未运行，通过 `python -m axi.daemon.server` 后台启动
+3. 轮询 socket（最多 30 次，间隔 0.1s）等待 daemon 就绪
+
+#### 启动流程
+
+`DaemonServer.start()` 依次执行：
+1. 加载 `axi.json` 配置
+2. 初始化 MCPProvider 和 Registry
+3. 创建 Embedding provider + cache（如果配置了 `search.embedding`）
+4. 连接所有 MCP server（stdio 长连接），获取工具定义并注册到 Registry
+5. 创建 `~/.axi/` 目录，清理旧 socket 文件
+6. 写入 PID 到 `~/.axi/daemon.pid`
+7. 启动 Unix socket server（`~/.axi/daemon.sock`）
+8. 启动 idle watchdog 任务
+9. 注册信号处理（SIGTERM / SIGINT → 优雅关闭）
+
+#### Idle Watchdog
+
+daemon 内置空闲检测机制，防止无限占用资源：
+
+- 每 **60 秒**检查一次空闲时间
+- 每次处理请求时更新 `_last_activity` 时间戳（`status` 和 `shutdown` 请求除外，不重置计时器）
+- 空闲超过 `idleTimeoutMinutes`（默认 30 分钟）后自动执行 `stop()`
+
+#### 关闭流程
+
+三种关闭方式，均执行相同的清理逻辑：
+
+| 触发方式 | 说明 |
+|----------|------|
+| `axi daemon stop` | CLI 发送 `shutdown` 请求，daemon 优雅退出 |
+| idle 超时 | watchdog 检测到空闲超时，自动关闭 |
+| SIGTERM / SIGINT | 操作系统信号触发优雅关闭 |
+
+清理步骤：关闭所有 MCP 连接 → 删除 `~/.axi/daemon.sock` → 删除 `~/.axi/daemon.pid`
+
+#### 通信协议
+
+CLI 和 daemon 通过 Unix socket 以 JSON Line 格式通信（每行一个完整 JSON 对象）：
+
+- **请求**（`DaemonRequest`）：`method` + 可选参数（`tool_name`、`params`、`query`、`top_k`）
+- **响应**（`DaemonResponse`）：`status`（"success" / "error"）+ `data` / `error`
+- 客户端超时：30 秒
+
 ### Registry（工具注册中心）
 
 所有工具的索引，存储工具元数据（name, description, input_schema, provider 来源等），支持搜索。

@@ -1,6 +1,6 @@
 [project]
-name = "axi"
-version = "0.0.3"
+name = "axi-cli"
+version = "0.0.4"
 description = "Agent eXecution Interface - unified tool layer for AI Agents"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,6 +23,17 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/axi"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    ".github/",
+    ".python-version",
+    "CLAUDE.md",
+    "axi.json.example",
+    "docs/",
+    "tests/",
+    "uv.lock",
+]
 
 [dependency-groups]
 dev = [

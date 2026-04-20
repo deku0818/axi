@@ -146,8 +146,9 @@ Daemon 进程配置。
 | `idleTimeoutMinutes` | number | `30` | 空闲自动关闭时间（分钟） |
 
 Daemon 运行时文件位于 `~/.axi/`：
-- `daemon.sock` — Unix socket
-- `daemon.pid` — 进程 PID 文件
+- `daemon.sock` — Unix socket，CLI 与 daemon 的通信通道
+- `daemon.pid` — 进程 PID 文件，用于检测 daemon 是否存活
+- `daemon.log` — daemon 启动和错误日志
 
 ---
 
@@ -155,11 +156,15 @@ Daemon 运行时文件位于 `~/.axi/`：
 
 | 变量 | 说明 | 默认 |
 |------|------|------|
+| `AXI_CONFIG` | 自定义 `axi.json` 路径 | `axi.json`（当前工作目录） |
 | `AXI_RICH` | 设为 `1`/`true` 启用、`0`/`false` 禁用 Rich 格式化（优先于 `cli.rich`） | 未设置时取 `cli.rich` |
 | `JINA_API_KEY` | Jina Embedding API 密钥（`search.embedding.apiKey` 未配置时使用） | — |
 | `OPENAI_API_KEY` | OpenAI Embedding API 密钥（`search.embedding.apiKey` 未配置时使用） | — |
 
 ```bash
+# 自定义配置文件路径
+AXI_CONFIG=/path/to/custom.json axi list
+
 # 启用 Rich 格式化
 AXI_RICH=1 axi search "web"
 
