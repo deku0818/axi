@@ -1,10 +1,20 @@
 # axi — Agent eXecution Interface
 
-AI Agent 与外部系统之间的统一工具层。通过 CLI 作为万能适配器，让任何工具（MCP server、Python 函数）变成 Agent 可发现、可搜索、可编程调用的命令。
+AI Agent 与外部系统之间的统一工具层。通过 CLI 作为万能适配器，让任何工具（MCP server、Python 函数等）变成 Agent 可发现、可搜索、可编程调用的命令。
 
-## 项目状态
+## 代码风格
 
-早期开发阶段。核心功能已实现：原生工具注册、MCP 对接、daemon 模式。
+代码应当具备可读性、简洁性和高效性。
+
+- 架构采用分层设计：底层提供基本操作和数据结构，组合后具备充分的灵活性；高层提供开箱即用的 API，足以满足大多数使用场景。
+- 偏好简洁明确的函数，每个函数专注于单一任务，输入和输出类型应明确指定。
+- 用最少的代码解决问题，不要任何预设之外的东西，如果你写了 200 行，而 50 行足矣，推倒重写。
+- 不为不可能发生的场景写错误处理。
+- 自问一句："一位资深工程师看到这段代码，会觉得过度设计吗？"答案若是肯定，就精简。
+
+## 依赖管理
+
+项目使用 uv 管理；项目依赖始终使用 uv 进行管理，而非直接改 `pyproject.toml`。
 
 ## 技术栈
 
@@ -12,18 +22,6 @@ AI Agent 与外部系统之间的统一工具层。通过 CLI 作为万能适配
 - 包管理：uv (pyproject.toml)
 - CLI：Typer / 数据模型：Pydantic / MCP：mcp 官方 SDK
 - 搜索：bm25s + jieba（BM25） / langchain-openai + langchain-community（Embedding）
-
-## 设计文档
-
-详细设计信息见 `docs/` 目录：
-
-- [docs/design.md](docs/design.md) — 定位、设计原则、核心功能、执行模式
-- [docs/architecture.md](docs/architecture.md) — 分层架构、daemon 模式、核心模块职责
-- [docs/usage.md](docs/usage.md) — 使用方式定义（以终为始）
-- [docs/guide.md](docs/guide.md) — 完整使用指南（面向用户和 Agent）
-- [docs/tech-stack.md](docs/tech-stack.md) — 技术选型、目录结构、模块职责
-- [docs/configuration.md](docs/configuration.md) — axi.json 与环境变量配置参考
-- [docs/open-questions.md](docs/open-questions.md) — 待决策事项
 
 ## 快速参考
 
@@ -76,13 +74,13 @@ src/axi/
 - MCP 工具：`axi.json` 的 `mcpServers` key 名作为 server 名，调用格式 `server/tool_name`
 - 原生工具：`nativeTools` 的 `name` 字段作为 server 名（省略时自动推导：文件路径取 stem，模块路径取最后一段），调用格式同样为 `server/tool_name`
 
-### 依赖管理
+### Skills 编写与同步
 
-- 使用 `uv add <package>` 添加依赖，**不要直接修改 pyproject.toml**
-- 核心依赖：typer, pydantic, mcp, bm25s, jieba, langchain-openai, langchain-community
-- 添加新依赖前需确认必要性，保持轻量
+`skills/` 下的 SKILL.md 是项目对外的 Agent 使用文档（随包分发），**质量和同步都是代码规范的一部分**。
 
-## 开发约定
+- **同步**：提交前跑 `/sync-skills`，该命令会扫描 diff、识别对外行为改动、逐个比对 skill 并协助更新
+- **Description 即触发器**：frontmatter 的 `description` 明确列"做什么 + 何时触发 + 反向 skip 条件"；表述略 pushy（Claude 倾向 undertrigger，过于保守反而用不到）
+- **渐进式披露**：SKILL.md body 以"信息密度高、便于 Agent 速读"为目标，紧凑优先（参考现有两个 skill 的 ~120 行体量）；超出时拆到 `references/` 子目录按需加载，命令级参数交给 `--help`
+- **祈使句 + 解释 why**：用"先 X 再 Y"而非"应该 / 可以"；说明原因而非堆 MUST；保持通用，别绑死到某个超窄示例
+- **自包含**：不引用仓库内 `docs/*`（pip 分发后不可达），兜底用 `--help` 或指向源码
 
-- 与用户沟通使用中文
-- 边开发边讨论，沟通结果及时更新到 docs/ 文档
