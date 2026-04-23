@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.5] - 2026-04-23
+
+### Added
+- Python entry_points 自动发现原生工具：扩展包在 `pyproject.toml` 里声明 `[project.entry-points."axi.native_tools"]` 即可被 axi 自动发现，无需 `axi.json` 登记
+- `docs/configuration.md` 补充 entry_points 机制说明与合并规则（去重、同名 server collision、加载失败降级）
+
+### Changed
+- `load_native_tool_modules` 从 `providers/mcp.py` 搬到 `providers/native.py`，职责回归原生工具 Provider
+- 模块加载失败时不再占位，避免对后续合法包误报 server 名 collision
+
 ## [0.0.4] - 2026-04-20
 
 ### Added

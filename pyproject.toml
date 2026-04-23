@@ -1,6 +1,6 @@
 [project]
 name = "axi-cli"
-version = "0.0.4"
+version = "0.0.5"
 description = "Agent eXecution Interface - unified tool layer for AI Agents"
 readme = "README.md"
 requires-python = ">=3.12"

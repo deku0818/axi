@@ -1,13 +1,11 @@
 """MCP Provider：读取 axi.json，连接 MCP server，注册工具。"""
 
 import asyncio
-import importlib.util
 import json
 import logging
 import os
 import threading
 from contextlib import AsyncExitStack
-from pathlib import Path
 from typing import Any, Self
 
 from mcp import ClientSession, StdioServerParameters
@@ -15,11 +13,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from pydantic import Field, model_validator
 
-from axi.config import (
-    MCPServerConfig as MCPServerBaseConfig,
-    NativeToolEntry,
-    app_config,
-)
+from axi.config import MCPServerConfig as MCPServerBaseConfig, app_config
 from axi.models import RunResult, ToolMeta, ToolSource
 
 logger = logging.getLogger(__name__)
@@ -218,59 +212,6 @@ def run_async(coro: Any) -> Any:
     loop = _get_loop()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result()
-
-
-def _import_from_file(file_path: str) -> None:
-    """通过文件路径 import 模块，触发 @tool 注册。"""
-    path = Path(file_path).resolve()
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-    module_name = path.stem
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load module from: {file_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-
-def _resolve_server_name(entry: NativeToolEntry) -> str:
-    """推导 native tool 的 server 名称。"""
-    if entry.name is not None:
-        return entry.name
-    if entry.module.endswith(".py"):
-        return Path(entry.module).stem
-    return entry.module.rsplit(".", 1)[-1]
-
-
-def load_native_tool_modules() -> None:
-    """从全局配置的 nativeTools 列表中加载模块，触发 @tool 注册。"""
-    entries = app_config.native_tools
-    if not entries:
-        return
-
-    from axi.cli import get_registry
-
-    registry = get_registry()
-
-    for entry in entries:
-        try:
-            server_name = _resolve_server_name(entry)
-
-            # 记录导入前已有的工具
-            before = set(registry.list_names())
-
-            if entry.module.endswith(".py"):
-                _import_from_file(entry.module)
-            else:
-                importlib.import_module(entry.module)
-
-            # 为新增的工具设置 server
-            new_names = [k for k in registry.list_names() if k not in before]
-            for name in new_names:
-                registry.set_server(name, server_name)
-
-        except Exception:
-            logger.exception("Failed to load native tool '%s'", entry)
 
 
 def load_mcp_tools_sync() -> tuple[MCPProvider, list[ToolMeta]]:

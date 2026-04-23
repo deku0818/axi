@@ -34,7 +34,7 @@ _executor = Executor(_registry)
 @app.callback(invoke_without_command=True)
 def main_callback(ctx: typer.Context) -> None:
     """CLI 启动时加载 axi.json 中配置的原生工具模块。"""
-    from axi.providers.mcp import load_native_tool_modules
+    from axi.providers.native import load_native_tool_modules
 
     load_native_tool_modules()
     if ctx.invoked_subcommand is None:
