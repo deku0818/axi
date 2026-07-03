@@ -26,6 +26,9 @@ app = typer.Typer(
 daemon_app = typer.Typer(help="管理 axi daemon")
 app.add_typer(daemon_app, name="daemon")
 
+mcp_app = typer.Typer(help="以 MCP Server 模式运行 axi")
+app.add_typer(mcp_app, name="mcp")
+
 # 全局实例（原生工具用）
 _registry = Registry()
 _executor = Executor(_registry)
@@ -131,6 +134,28 @@ def daemon_status() -> None:
         "native_tools": native_server_tools,
     }
     _output_json(result)
+
+
+# ── MCP Server 模式 ──────────────────────────────────────────────
+
+
+@mcp_app.command("stdio")
+def mcp_stdio() -> None:
+    """以 stdio transport 启动 MCP Server。"""
+    from axi.mcp_server import build_mcp_server
+
+    build_mcp_server().run(transport="stdio")
+
+
+@mcp_app.command("http")
+def mcp_http(
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址"),
+    port: int = typer.Option(8080, "--port", "-p", help="监听端口"),
+) -> None:
+    """以 HTTP (streamable-http) transport 启动 MCP Server。"""
+    from axi.mcp_server import build_mcp_server
+
+    build_mcp_server(host=host, port=port).run(transport="streamable-http")
 
 
 # ── 核心命令 ──────────────────────────────────────────────
