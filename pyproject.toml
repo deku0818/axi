@@ -1,6 +1,6 @@
 [project]
 name = "axi-cli"
-version = "0.0.6"
+version = "0.0.7"
 description = "Agent eXecution Interface - unified tool layer for AI Agents"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -45,3 +45,7 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "ruff>=0.15.8",
 ]
+
+[tool.pytest.ini_options]
+# 只从 tests/ 收集，隔离本地 scratch 的 test/（已 gitignore，不随包分发）
+testpaths = ["tests"]

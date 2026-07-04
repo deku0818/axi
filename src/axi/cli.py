@@ -2,13 +2,12 @@
 
 import json
 import logging
-from collections import Counter
 from enum import Enum
 
 import typer
 from pydantic import BaseModel
 
-from axi.config import app_config
+from axi.config import CONFIG_PATH, app_config
 from axi.daemon.client import (
     LOG_PATH,
     daemon_request,
@@ -18,7 +17,7 @@ from axi.daemon.client import (
 )
 from axi.daemon.protocol import DaemonRequest
 from axi.executor import Executor
-from axi.models import RunResult, SearchResult
+from axi.models import RunResult, SearchResult, allowed_types
 from axi.registry import (
     AmbiguousToolError,
     Registry,
@@ -128,16 +127,10 @@ def daemon_status() -> None:
         _output_json({"status": "error", "error": resp.error})
         raise typer.Exit(code=1)
 
-    data = resp.data
-    # 原生工具按 server 统计
-    native_server_tools = dict(
-        Counter(meta.server or "unknown" for meta in _registry.list_all())
-    )
-
     result = {
         "status": "running",
-        **data,
-        "native_tools": native_server_tools,
+        **resp.data,
+        "native_tools": _registry.server_tool_counts(),
     }
     _output_json(result)
 
@@ -159,9 +152,9 @@ def _search_and_merge(
     elif resp.status == "error":
         logger.warning("Daemon search failed: %s", resp.error)
 
-    combined = [r.model_dump(exclude_none=True) for r in local_results] + (
-        mcp_results or []
-    )
+    # native（本地 registry）与 MCP（daemon）是两套独立索引，分数不可比，
+    # 无法跨源真正排序；各自已取回 top_k，直接并列拼接（本地在前）。
+    combined = [r.model_dump() for r in local_results] + mcp_results
     typer.echo(json.dumps(combined, ensure_ascii=False))
 
 
@@ -286,6 +279,14 @@ def _resolve_tool(name: str) -> dict:
     return {"error": resp.error or f"Tool not found: {name}"}
 
 
+def _daemon_input_schema(tool_name: str) -> dict:
+    """从 daemon 取 MCP 工具的 input_schema；取不到返回 {}（解析退回 JSON 猜类型）。"""
+    resp = daemon_request(DaemonRequest(method="describe", tool_name=tool_name))
+    if resp.status == "success" and isinstance(resp.data, dict):
+        return resp.data.get("input_schema") or {}
+    return {}
+
+
 @app.command()
 def describe(
     tool_name: str = typer.Argument(help="工具完整名称（逗号分隔多个）"),
@@ -319,25 +320,32 @@ def run(
 
     json_str, args = _extract_option(args, "--json", "-j")
 
+    # 先解析工具一次：本地命中 → 原生（进程内执行，schema 就在 meta 上）；
+    # 未命中 → 走 daemon（MCP）。避免解析参数和执行各 resolve 一遍。
+    try:
+        meta = _registry.resolve(tool_name)
+    except AmbiguousToolError as e:
+        _output_json({"error": str(e)})
+        raise typer.Exit(code=1)
+    except ToolNotFoundError:
+        meta = None
+
     if json_str:
         try:
             parsed = json.loads(json_str)
         except json.JSONDecodeError as e:
             _output_json(RunResult.fail(f"Invalid JSON argument: {e}"))
             raise typer.Exit(code=1)
+    elif not args:
+        parsed = {}
     else:
-        parsed = _parse_params(args)
+        # 按目标 schema 解析 --key value（string 字段保留原文）；MCP schema 问 daemon
+        schema = meta.input_schema if meta else _daemon_input_schema(tool_name)
+        parsed = _parse_params(args, schema)
 
-    try:
-        meta = _registry.resolve(tool_name)
-        result = _executor.run(meta.full_name, parsed)
-        _output_json(result)
+    if meta is not None:
+        _output_json(_executor.run(meta.full_name, parsed))
         return
-    except AmbiguousToolError as e:
-        _output_json({"error": str(e)})
-        raise typer.Exit(code=1)
-    except ToolNotFoundError:
-        pass  # 本地未找到，继续尝试 daemon
 
     resp = daemon_request(
         DaemonRequest(method="call_tool", tool_name=tool_name, params=parsed)
@@ -380,6 +388,98 @@ def mcp_command(
     )
 
 
+@app.command()
+def doctor() -> None:
+    """自检：配置、daemon、MCP 连接、embedding、native 工具来源。
+
+    有问题时以非零码退出并在 ``issues`` 里给出可执行的下一步。
+    配置了 MCP server 时会拉起 daemon 以验证连接。
+    """
+    import importlib.metadata
+
+    from axi.providers.native import NATIVE_TOOLS_ENTRY_POINT_GROUP
+
+    issues: list[str] = []
+
+    # native 工具及其来源（entry_points 自动发现 = 任何已装包都可能注入工具，需可见）
+    try:
+        eps = list(
+            importlib.metadata.entry_points(group=NATIVE_TOOLS_ENTRY_POINT_GROUP)
+        )
+    except Exception:
+        eps = []
+    server_counts = _registry.server_tool_counts()
+    native = {
+        "total": sum(server_counts.values()),
+        "servers": server_counts,
+        "from_config": [e.module for e in app_config.native_tools],
+        "from_entry_points": [{"name": ep.name, "value": ep.value} for ep in eps],
+    }
+
+    # embedding
+    emb = app_config.search.embedding
+    if emb.provider:
+        embedding = {
+            "provider": emb.provider,
+            "api_key": "present" if emb.api_key else "missing",
+            "model": emb.model,
+        }
+        if not emb.api_key:
+            env_name = "JINA_API_KEY" if emb.provider == "jina" else "OPENAI_API_KEY"
+            issues.append(
+                f"Embedding provider '{emb.provider}' set but no API key. Put it in "
+                f"axi.json search.embedding.apiKey or the {env_name} env var."
+            )
+    else:
+        embedding = {"provider": None, "note": "BM25-only, no semantic search"}
+
+    # daemon + MCP 连接（仅在配置了 MCP server 时拉起 daemon 验证）
+    configured = set(app_config.mcp_servers)
+    mcp_servers: list[dict] = []
+    if configured:
+        resp = daemon_request(DaemonRequest(method="status"))
+        if resp.status == "success":
+            connected = resp.data.get("server_tools", {})
+            daemon = {
+                "running": True,
+                "pid": resp.data.get("pid"),
+                "uptime_seconds": resp.data.get("uptime_seconds"),
+            }
+            for name in sorted(configured):
+                if name in connected:
+                    mcp_servers.append(
+                        {
+                            "server": name,
+                            "status": "connected",
+                            "tools": connected[name],
+                        }
+                    )
+                else:
+                    mcp_servers.append({"server": name, "status": "not_connected"})
+                    issues.append(
+                        f"MCP server '{name}' configured but not connected. "
+                        f"Check daemon log: {LOG_PATH}"
+                    )
+        else:
+            daemon = {"running": False, "error": resp.error}
+            issues.append(f"Daemon unavailable: {resp.error}. Check log: {LOG_PATH}")
+    else:
+        daemon = {"running": is_daemon_running()}
+
+    report = {
+        "ok": not issues,
+        "config": {"path": str(CONFIG_PATH), "exists": CONFIG_PATH.exists()},
+        "daemon": daemon,
+        "native_tools": native,
+        "mcp_servers": mcp_servers,
+        "embedding": embedding,
+        "issues": issues,
+    }
+    _output_json(report)
+    if issues:
+        raise typer.Exit(code=1)
+
+
 # ── 参数解析辅助函数 ──────────────────────────────────────────────
 
 
@@ -397,7 +497,33 @@ def _extract_option(args: list[str], *names: str) -> tuple[str | None, list[str]
     return value, remaining
 
 
-def _parse_params(params: list[str]) -> dict:
+def _schema_field_types(schema: dict, key: str) -> set[str]:
+    """取字段在 schema 里声明的类型集合；字段不存在或无 schema 返回空集。"""
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return set()
+    prop = props.get(key)
+    return allowed_types(prop) if isinstance(prop, dict) else set()
+
+
+def _coerce_cli_value(key: str, value: str, schema: dict) -> object:
+    """按目标字段类型决定是否 JSON 解析。
+
+    字段声明为 string → 原样保留，避免 ``true``/``42``/``null`` 被解析成
+    非字符串类型（``--title false`` 应是字符串 "false"）。其余（含未知字段、
+    无 schema）尝试 JSON 解析，让 ``--count 42``→42、``--flag true``→True、
+    ``--data {...}``→dict 正常工作，失败落回原字符串。
+    """
+    if "string" in _schema_field_types(schema, key):
+        return value
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return value
+
+
+def _parse_params(params: list[str], schema: dict | None = None) -> dict:
+    schema = schema or {}
     parsed: dict = {}
     i = 0
     while i < len(params):
@@ -405,11 +531,7 @@ def _parse_params(params: list[str]) -> dict:
         if arg.startswith("--"):
             key = arg[2:]
             if i + 1 < len(params) and not params[i + 1].startswith("--"):
-                value = params[i + 1]
-                try:
-                    parsed[key] = json.loads(value)
-                except (json.JSONDecodeError, ValueError):
-                    parsed[key] = value
+                parsed[key] = _coerce_cli_value(key, params[i + 1], schema)
                 i += 2
             else:
                 parsed[key] = True

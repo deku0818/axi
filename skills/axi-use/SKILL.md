@@ -1,6 +1,6 @@
 ---
 name: axi-use
-description: 通过 `axi` CLI（或在 Python 中使用 `from axi import tool`）发现并调用工具。当任务需要执行外部工具（当前拥有plane任务管理工具）请使用此skill。核心工作流程为：`axi search <query>` → `axi describe <tool>` → `axi run <tool> --key value`；当任务涉及多次调用之间的循环、聚合或后处理时，请优先使用 Python 进行处理。
+description: 通过 `axi` CLI（或在 Python 中使用 `from axi import tool`）发现并调用工具。当任务需要执行外部工具（当前拥有<changeme>）请使用此skill。核心工作流程为：`axi search <query>` → `axi describe <tool>` → `axi run <tool> --key value`；当任务涉及多次调用之间的循环、聚合或后处理时，请优先使用 Python 进行处理。
 ---
 
 # axi — Agent 使用手册
@@ -28,8 +28,9 @@ axi 是当前环境里的工具调用层。有工具需求时，**先 `axi searc
 
 ```bash
 axi search "web" --top-k 3
-# [{"name":"jina/jina_search","description":"Search the web. ...","source":"mcp","score":1.0},
-#  {"name":"jina/jina_reader","description":"Read and extract content from web page.","source":"mcp","score":0.92}]
+# [{"name":"jina/jina_search","description":"Search the web. ...","source":"mcp"},
+#  {"name":"jina/jina_reader","description":"Read and extract content from web page.","source":"mcp"}]
+# 结果按相关性排序（越靠前越相关），不含分数
 
 axi grep "^jina/" --limit 5
 # 精确列出 jina server 下所有工具

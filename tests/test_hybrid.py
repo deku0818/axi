@@ -47,9 +47,8 @@ class TestHybridSearch:
         )
         results = hybrid.search("天气")
         assert len(results) > 0
-        assert results[0].name == "s/get_weather"
-        assert results[0].score is not None
-        assert results[0].score == 1.0  # 第一名归一化为 1.0
+        assert results[0].name == "s/get_weather"  # 最相关的排第一
+        assert not hasattr(results[0], "score")  # 结果不再暴露分数
 
     def test_empty_query_returns_empty(self):
         hybrid = HybridSearch()

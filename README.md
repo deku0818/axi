@@ -80,6 +80,7 @@ axi run jina/jina_search --query "hello world" --count 3
 | `axi describe <tool>` | 查看工具完整 schema |
 | `axi run <tool> --key value` | 执行工具（也支持 `-j '{...}'` 传 JSON） |
 | `axi mcp` | 将 axi 工具导出为 MCP server（stdio / HTTP） |
+| `axi doctor` | 自检：配置、daemon、MCP 连接、embedding、native 工具来源；有问题非零退出 |
 | `axi daemon start` | 手动启动 daemon（通常无需手动，CLI 会自动拉起） |
 | `axi daemon status` | 查看 daemon 状态（PID、运行时长、空闲时长、工具数量等） |
 | `axi daemon stop` | 手动停止 daemon |
@@ -152,7 +153,7 @@ axi 提供两种搜索方式：
 - **`axi search`** — 混合搜索，默认 BM25 关键词搜索（bm25s + jieba 分词，支持中英文）。配置 `search.embedding` 后启用 BM25 + Embedding 混合搜索（RRF 融合排序，分数归一化 0-1）
 - **`axi grep`** — 正则表达式搜索，按工具名和描述匹配
 
-搜索结果包含 `score` 字段，便于 Agent 判断相关性。
+结果按相关性排序返回，顺序本身即信号（不含分数：native 与 MCP 来自两套索引、分数不可比）。
 
 ## Daemon 模式
 

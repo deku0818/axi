@@ -19,7 +19,7 @@ def _reset_fake_ep_module() -> None:
     for full_name in list(registry.list_names()):
         if any(full_name.endswith(f"/{t}") for t in _FAKE_TOOL_SHORT_NAMES):
             registry._tools.pop(full_name, None)
-            registry._dirty = True
+            registry._version += 1
 
 
 def _make_ep(name: str, value: str) -> EntryPoint:

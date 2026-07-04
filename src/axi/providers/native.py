@@ -183,6 +183,15 @@ def _load_native_entry(
     for name in new_names:
         registry.set_server(name, server_name)
         _rekey_native_tool(name, f"{server_name}/{name}")
+    # 记录来源，便于审计：entry_points 自动发现意味着任何已安装的包都可能注入工具
+    logger.info(
+        "Loaded %d native tool(s) from '%s' (%s) under server '%s': %s",
+        len(new_names),
+        module,
+        source,
+        server_name,
+        ", ".join(new_names),
+    )
 
 
 def load_native_tool_modules() -> None:

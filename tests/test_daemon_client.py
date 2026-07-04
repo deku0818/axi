@@ -2,8 +2,27 @@
 
 import pytest
 
+from axi.config import DaemonConfig
 from axi.daemon.client import _send
 from axi.daemon.protocol import DaemonRequest
+
+
+class TestRequestTimeout:
+    """AXI_REQUEST_TIMEOUT 优先于 axi.json，落在 DaemonConfig 的 env 校验里。"""
+
+    def test_env_overrides_config(self, monkeypatch):
+        monkeypatch.setenv("AXI_REQUEST_TIMEOUT", "7")
+        cfg = DaemonConfig.model_validate({"requestTimeout": 45})
+        assert cfg.request_timeout == 7.0
+
+    def test_invalid_env_keeps_config(self, monkeypatch):
+        monkeypatch.setenv("AXI_REQUEST_TIMEOUT", "not-a-number")
+        cfg = DaemonConfig.model_validate({"requestTimeout": 45})
+        assert cfg.request_timeout == 45.0
+
+    def test_default_without_env(self, monkeypatch):
+        monkeypatch.delenv("AXI_REQUEST_TIMEOUT", raising=False)
+        assert DaemonConfig.model_validate({}).request_timeout == 120.0
 
 
 class TestDaemonClientErrors:

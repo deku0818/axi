@@ -125,7 +125,7 @@ axi describe <server>/<tool>                # input_schema 字段、类型、req
 axi run <server>/<tool> --key value          # 跑通，返回 {"status":"success","data":...}
 ```
 
-**搜不到比跑不通更常见**——description 太短、只写了类名或方法名都会导致 BM25/Embedding 召回差。看着 `axi search` 返回列表里有没有你的工具，score 是不是高位。
+**搜不到比跑不通更常见**——description 太短、只写了类名或方法名都会导致 BM25/Embedding 召回差。用几个真实查询跑 `axi search`，看你的工具有没有出现、排得够不够靠前。
 
 ---
 

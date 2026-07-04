@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from typing import TYPE_CHECKING
+
 from axi.config import SearchConfig
 from axi.models import SearchResult, ToolMeta
 from axi.search.cache import EmbeddingCache
 from axi.search.embedding import EmbeddingProvider, create_embedding_provider
-from axi.search.hybrid import HybridSearch
-from axi.search.regex import RegexSearch
+
+if TYPE_CHECKING:
+    from axi.search.hybrid import HybridSearch
+    from axi.search.regex import RegexSearch
 
 
 def split_names(value: str) -> list[str]:
@@ -38,14 +43,19 @@ class Registry:
         weight_embedding: float = 0.7,
     ) -> None:
         self._tools: dict[str, ToolMeta] = {}
-        self._regex = RegexSearch()
-        self._hybrid = HybridSearch(
-            embedding_provider=embedding_provider,
-            embedding_cache=embedding_cache,
-            weight_bm25=weight_bm25,
-            weight_embedding=weight_embedding,
-        )
-        self._dirty = True
+        # 搜索引擎按需构建：bm25s/jieba/numpy 是重 import，describe/run/list
+        # 完全用不到，延迟到 search()/grep() 首次调用时才付这笔冷启动成本。
+        self._embedding_provider = embedding_provider
+        self._embedding_cache = embedding_cache
+        self._weight_bm25 = weight_bm25
+        self._weight_embedding = weight_embedding
+        self._regex: RegexSearch | None = None
+        self._hybrid: HybridSearch | None = None
+        # 工具集每变一次 _version +1；各引擎记住自己上次 build 的 version，
+        # 只在落后时重建——晚建的引擎不再拖着已是最新的另一引擎陪跑一次。
+        self._version = 0
+        self._regex_version = -1
+        self._hybrid_version = -1
 
     @classmethod
     def from_search_config(cls, cfg: SearchConfig) -> Registry:
@@ -61,7 +71,7 @@ class Registry:
     def register(self, meta: ToolMeta) -> None:
         """注册一个工具。"""
         self._tools[meta.full_name] = meta
-        self._dirty = True
+        self._version += 1
 
     def get(self, full_name: str) -> ToolMeta | None:
         """按完整名称获取工具元数据。"""
@@ -104,6 +114,10 @@ class Registry:
         """列出所有工具的 full_name。"""
         return list(self._tools.keys())
 
+    def server_tool_counts(self) -> dict[str, int]:
+        """按 server 统计工具数量（无 server 归入 "unknown"）。"""
+        return dict(Counter(m.server or "unknown" for m in self._tools.values()))
+
     def set_server(self, full_name: str, server: str) -> None:
         """更新工具的 server 名，同时更新注册 key。"""
         meta = self._tools.pop(full_name, None)
@@ -111,22 +125,31 @@ class Registry:
             return
         updated = meta.model_copy(update={"server": server})
         self._tools[updated.full_name] = updated
-        self._dirty = True
+        self._version += 1
 
     def search(self, query: str, top_k: int = 5) -> list[SearchResult]:
         """混合搜索工具（BM25 + Embedding）。"""
-        self._rebuild_index()
+        if self._hybrid is None:
+            from axi.search.hybrid import HybridSearch
+
+            self._hybrid = HybridSearch(
+                embedding_provider=self._embedding_provider,
+                embedding_cache=self._embedding_cache,
+                weight_bm25=self._weight_bm25,
+                weight_embedding=self._weight_embedding,
+            )
+        if self._hybrid_version != self._version:
+            self._hybrid.build(list(self._tools.values()))
+            self._hybrid_version = self._version
         return self._hybrid.search(query, top_k=top_k)
 
     def grep(self, pattern: str, top_k: int = 10) -> list[SearchResult]:
         """正则表达式搜索工具。"""
-        self._rebuild_index()
-        return self._regex.search(pattern, top_k=top_k)
+        if self._regex is None:
+            from axi.search.regex import RegexSearch
 
-    def _rebuild_index(self) -> None:
-        if not self._dirty:
-            return
-        tools = list(self._tools.values())
-        self._regex.build(tools)
-        self._hybrid.build(tools)
-        self._dirty = False
+            self._regex = RegexSearch()
+        if self._regex_version != self._version:
+            self._regex.build(list(self._tools.values()))
+            self._regex_version = self._version
+        return self._regex.search(pattern, top_k=top_k)

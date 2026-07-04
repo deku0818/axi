@@ -6,6 +6,20 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 
+def allowed_types(prop: dict) -> set[str]:
+    """提取属性 schema 允许的原始类型，覆盖 type 为字符串/列表及 anyOf 分支（递归）。"""
+    types: set[str] = set()
+    t = prop.get("type")
+    if isinstance(t, str):
+        types.add(t)
+    elif isinstance(t, list):
+        types.update(x for x in t if isinstance(x, str))
+    for branch in prop.get("anyOf", []):
+        if isinstance(branch, dict):
+            types |= allowed_types(branch)
+    return types
+
+
 class ToolSource(str, Enum):
     """工具来源类型。"""
 
@@ -66,9 +80,13 @@ class RunResult(ResultEnvelope):
 
 
 class SearchResult(BaseModel):
-    """搜索结果条目。"""
+    """搜索结果条目。
+
+    不含相关性分数：native（本地）与 MCP（daemon）来自两套独立索引、
+    各自归一化，跨源分数不可比，暴露出来只会误导 Agent。结果按相关性
+    排序即可，顺序本身就是信号。
+    """
 
     name: str = Field(description="工具完整名称")
     description: str = Field(description="工具描述")
     source: ToolSource = Field(description="工具来源")
-    score: float | None = Field(default=None, description="相关性分数")

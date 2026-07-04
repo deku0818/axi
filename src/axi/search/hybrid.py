@@ -37,14 +37,14 @@ def _rrf_fuse(
 def _to_results(
     tools: list[ToolMeta], scored: list[tuple[int, float]]
 ) -> list[SearchResult]:
+    # scored 已按分数降序；分数只用于排序，不进入结果（跨源不可比）。
     return [
         SearchResult(
             name=tools[idx].full_name,
             description=tools[idx].description,
             source=tools[idx].source,
-            score=round(score, 4),
         )
-        for idx, score in scored
+        for idx, _score in scored
     ]
 
 

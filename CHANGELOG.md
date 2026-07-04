@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.7] - 2026-07-04
+
+### Added
+- `axi doctor` 自检命令：一次性检查配置、daemon、MCP server 连接、embedding、native 工具来源；配置了 MCP server 时拉起 daemon 验证连接，有问题以非零码退出并在 `issues` 里给出可执行的下一步。`native_tools.from_entry_points` 列出所有经 Python entry_points 自动注入的工具及来源模块，便于审计
+- daemon 请求超时可配置：`daemon.requestTimeout`（默认 120 秒，原硬编码 30 秒）+ `AXI_REQUEST_TIMEOUT` 环境变量（优先），超时信息指向调高方式
+- native 工具加载记录来源日志（模块 / entry_point + server + 工具名），便于审计自动注入
+
+### Fixed
+- 并发多个 axi 进程同时发现 daemon 未运行会各自拉起、互相 unlink socket / 覆盖 PID：改用启动文件锁串行化，只有持锁进程 spawn，其余复查后复用
+- CLI `--key value` 解析忽略工具 schema，把 string 字段的 `false` / `42` / `null` 误转成布尔 / 数字 / 空值：现在按目标字段类型决定是否 JSON 解析（string 字段保留原文，其余照常解析）
+
+### Changed
+- **Breaking**：搜索结果移除 `score` 字段——native 与 MCP 来自两套独立索引、各自归一化，跨源分数不可比，暴露只会误导 Agent；结果按相关性降序返回，顺序本身即信号
+- 搜索栈（bm25s / jieba / numpy）延迟到首次 `search` / `grep` 才 import，`describe` / `run` / `list` 不再付这笔冷启动成本；各引擎按工具集版本号独立重建
+- embedding 缓存从当前目录 `.axi/cache/embeddings.json` 移到 `~/.axi/cache/<配置路径哈希>.json`，按配置隔离、不再依赖 cwd
+- `allowed_types` / `server_tool_counts` 抽为公共函数，消除 cli / daemon / registry 间的重复实现
+
 ## [0.0.6] - 2026-07-03
 
 ### Added

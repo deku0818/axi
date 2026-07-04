@@ -65,7 +65,7 @@ axi list jina-mcp-tools
 
 ### axi search
 
-搜索已注册的工具。默认使用 BM25 关键词搜索（bm25s + jieba 分词），支持中英文自然语言查询。如果在 `axi.json` 中配置了 Embedding，则自动启用混合搜索（BM25 + Embedding，通过 RRF 融合排序）。返回匹配工具的名称、描述、来源和相关性分数。
+搜索已注册的工具。默认使用 BM25 关键词搜索（bm25s + jieba 分词），支持中英文自然语言查询。如果在 `axi.json` 中配置了 Embedding，则自动启用混合搜索（BM25 + Embedding，通过 RRF 融合排序）。返回匹配工具的名称、描述和来源，按相关性降序排列（顺序本身即信号，不含分数：native 与 MCP 来自两套独立索引、分数不可比）。
 
 ```bash
 # BM25 关键词搜索（默认）
@@ -95,7 +95,7 @@ axi search "web" --top-k 5
 **输出示例：**
 
 ```json
-[{"name":"jina-mcp-tools/jina_reader","description":"Read and extract content from web page.","source":"mcp","score":0.82}]
+[{"name":"jina-mcp-tools/jina_reader","description":"Read and extract content from web page.","source":"mcp"}]
 ```
 
 **Embedding 搜索配置：**
@@ -153,7 +153,7 @@ axi describe jina-mcp-tools/jina_search
 axi run jina-mcp-tools/jina_search --query "hello" --count 3
 ```
 
-值会自动尝试 JSON 解析（数字、布尔值等），解析失败则作为字符串。
+值按目标工具 schema 决定是否 JSON 解析：字段声明为 `string` 时原样保留（`--title false` 是字符串 `"false"`，不会被转成布尔），其余字段尝试 JSON 解析（`--count 3`→数字、`--flag true`→布尔），解析失败落回字符串。
 
 **方式二：--json 格式**
 
@@ -176,6 +176,22 @@ axi run jina-mcp-tools/jina_search -j '{"query": "hello", "count": 3}'
 {"status":"success","data":"..."}
 {"status":"error","error":"错误信息"}
 ```
+
+### axi doctor
+
+自检当前环境：配置文件、daemon、MCP server 连接、embedding、native 工具来源。配置了 MCP server 时会拉起 daemon 验证连接。发现问题时以非零码退出，并在 `issues` 里给出可执行的下一步。
+
+```bash
+axi doctor
+```
+
+**输出示例：**
+
+```json
+{"ok":true,"config":{"path":"~/.axi/axi.json","exists":true},"daemon":{"running":true,"pid":12345,"uptime_seconds":8},"native_tools":{"total":0,"servers":{},"from_config":[],"from_entry_points":[]},"mcp_servers":[{"server":"jina","status":"connected","tools":2}],"embedding":{"provider":null,"note":"BM25-only, no semantic search"},"issues":[]}
+```
+
+`native_tools.from_entry_points` 会列出所有通过 Python entry_points 自动注入的工具及其来源模块——任何已安装的包都可能注入工具，此项便于审计。
 
 ---
 

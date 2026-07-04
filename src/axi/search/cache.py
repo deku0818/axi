@@ -7,10 +7,13 @@ import json
 import logging
 from pathlib import Path
 
+from axi.config import AXI_HOME, CONFIG_HASH
+
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = Path(".axi/cache")
-CACHE_FILE = CACHE_DIR / "embeddings.json"
+# 缓存随配置隔离，落在 ~/.axi 下（与 daemon 文件同处），不再依赖 cwd
+CACHE_DIR = AXI_HOME / "cache"
+CACHE_FILE = CACHE_DIR / f"{CONFIG_HASH}.json"
 
 
 def content_hash(text: str) -> str:

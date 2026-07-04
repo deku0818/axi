@@ -5,7 +5,6 @@ import logging
 import os
 import signal
 import time
-from collections import Counter
 from typing import Any
 
 import jsonschema
@@ -19,27 +18,13 @@ from axi.daemon.protocol import (
     DaemonResponse,
     DaemonStatus,
 )
-from axi.models import ToolSource
+from axi.models import ToolSource, allowed_types
 from axi.providers.mcp import MCPProvider
 from axi.registry import Registry, ToolResolveError
 
 logger = logging.getLogger(__name__)
 
 _IDLE_EXEMPT_METHODS = frozenset({"status", "shutdown"})
-
-
-def _allowed_types(prop: dict) -> set[str]:
-    """提取属性 schema 允许的原始类型，覆盖 type 为字符串/列表及 anyOf 分支。"""
-    types: set[str] = set()
-    t = prop.get("type")
-    if isinstance(t, str):
-        types.add(t)
-    elif isinstance(t, list):
-        types.update(x for x in t if isinstance(x, str))
-    for branch in prop.get("anyOf", []):
-        if isinstance(branch, dict):
-            types |= _allowed_types(branch)
-    return types
 
 
 def _coerce_to_schema(params: dict, schema: dict) -> dict:
@@ -57,7 +42,7 @@ def _coerce_to_schema(params: dict, schema: dict) -> dict:
         prop = props.get(key)
         if not isinstance(prop, dict):
             continue
-        allowed = _allowed_types(prop)
+        allowed = allowed_types(prop)
         if (
             "string" in allowed
             and not ({"integer", "number"} & allowed)
@@ -288,11 +273,6 @@ class DaemonServer:
         idle = now - self._last_activity
         idle_remaining = max(0.0, self._idle_timeout - idle)
 
-        # 按 server 统计工具数量
-        server_tools = dict(
-            Counter(t.server or "unknown" for t in self.registry.list_all())
-        )
-
         status = DaemonStatus(
             pid=os.getpid(),
             config_path=str(CONFIG_PATH),
@@ -300,7 +280,7 @@ class DaemonServer:
             idle_seconds=int(idle),
             idle_timeout_seconds=int(self._idle_timeout),
             idle_remaining_seconds=int(idle_remaining),
-            server_tools=server_tools,
+            server_tools=self.registry.server_tool_counts(),
         )
         return DaemonResponse.success(status.model_dump())
 

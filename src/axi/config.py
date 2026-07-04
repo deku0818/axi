@@ -1,5 +1,6 @@
 """axi 配置中心：Pydantic 模型化，统一加载 axi.json，全局共享。"""
 
+import hashlib
 import json
 import logging
 import os
@@ -10,9 +11,13 @@ from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
+AXI_HOME = Path("~/.axi").expanduser()
 CONFIG_PATH = (
-    Path(os.environ.get("AXI_CONFIG", "~/.axi/axi.json")).expanduser().resolve()
+    Path(os.environ.get("AXI_CONFIG", AXI_HOME / "axi.json")).expanduser().resolve()
 )
+# 每份配置的隔离键：daemon socket/pid/log 与 embedding 缓存都按它分目录，
+# 多项目（多份 AXI_CONFIG）互不干扰。
+CONFIG_HASH = hashlib.sha256(str(CONFIG_PATH).encode()).hexdigest()[:12]
 
 
 # ── 子配置模型 ──────────────────────────────────────────────
@@ -77,6 +82,24 @@ class DaemonConfig(BaseModel):
     idle_timeout_minutes: int = Field(
         default=30, alias="idleTimeoutMinutes", description="空闲自动关闭（分钟）"
     )
+    request_timeout: float = Field(
+        default=120,
+        alias="requestTimeout",
+        description="CLI 等待 daemon 单个请求的超时（秒），含工具调用",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def override_with_env(cls, values: dict) -> dict:
+        # 环境变量 AXI_REQUEST_TIMEOUT 优先于 axi.json（长工具调用可临时调高）
+        if isinstance(values, dict):
+            env = os.environ.get("AXI_REQUEST_TIMEOUT")
+            if env:
+                try:
+                    values["requestTimeout"] = float(env)
+                except ValueError:
+                    logger.warning("Ignoring invalid AXI_REQUEST_TIMEOUT=%r", env)
+        return values
 
 
 class MCPServerConfig(BaseModel):

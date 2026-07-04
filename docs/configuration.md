@@ -175,7 +175,8 @@ Daemon 进程配置。
 ```json
 {
   "daemon": {
-    "idleTimeoutMinutes": 30
+    "idleTimeoutMinutes": 30,
+    "requestTimeout": 120
   }
 }
 ```
@@ -183,11 +184,15 @@ Daemon 进程配置。
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `idleTimeoutMinutes` | number | `30` | 空闲自动关闭时间（分钟） |
+| `requestTimeout` | number | `120` | CLI 等待 daemon 单个请求的超时（秒），含工具调用；长任务可调高。环境变量 `AXI_REQUEST_TIMEOUT` 优先 |
 
-Daemon 运行时文件位于 `~/.axi/`：
-- `daemon.sock` — Unix socket，CLI 与 daemon 的通信通道
-- `daemon.pid` — 进程 PID 文件，用于检测 daemon 是否存活
-- `daemon.log` — daemon 启动和错误日志
+每份配置（每个 `AXI_CONFIG`）对应一个独立 daemon，运行时文件按配置路径哈希隔离，位于 `~/.axi/daemons/`：
+- `<hash>.sock` — Unix socket，CLI 与 daemon 的通信通道
+- `<hash>.pid` — 进程 PID 文件，用于检测 daemon 是否存活
+- `<hash>.log` — daemon 启动和错误日志
+- `<hash>.lock` — 启动文件锁，串行化并发进程对 daemon 的拉起
+
+Embedding 缓存同样按配置隔离，位于 `~/.axi/cache/<hash>.json`。
 
 ---
 
@@ -195,8 +200,9 @@ Daemon 运行时文件位于 `~/.axi/`：
 
 | 变量 | 说明 | 默认 |
 |------|------|------|
-| `AXI_CONFIG` | 自定义 `axi.json` 路径 | `axi.json`（当前工作目录） |
+| `AXI_CONFIG` | 自定义 `axi.json` 路径 | `~/.axi/axi.json` |
 | `AXI_RICH` | 设为 `1`/`true` 启用、`0`/`false` 禁用 Rich 格式化（优先于 `cli.rich`） | 未设置时取 `cli.rich` |
+| `AXI_REQUEST_TIMEOUT` | CLI 等待 daemon 单个请求的超时（秒），优先于 `daemon.requestTimeout` | 未设置时取 `daemon.requestTimeout`（`120`） |
 | `JINA_API_KEY` | Jina Embedding API 密钥（`search.embedding.apiKey` 未配置时使用） | — |
 | `OPENAI_API_KEY` | OpenAI Embedding API 密钥（`search.embedding.apiKey` 未配置时使用） | — |
 
