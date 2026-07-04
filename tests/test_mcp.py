@@ -27,7 +27,7 @@ async def test_mcp_connect_and_list_tools(mock_config):
     try:
         await conn.connect()
         tools = await conn.list_tools()
-        assert len(tools) == 2
+        assert len(tools) == 3
 
         echo_tool = next(t for t in tools if t.name == "echo")
         assert echo_tool.server == "test-server"
@@ -57,11 +57,24 @@ async def test_mcp_provider_connect_all(mock_config):
     provider = MCPProvider()
     try:
         tools = await provider.connect_all([mock_config])
-        assert len(tools) == 2
+        assert len(tools) == 3
 
         result = await provider.call_tool("test-server", "echo", {"message": "test"})
         assert result.status == "success"
         assert result.data == "test"
+    finally:
+        await provider.close_all()
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_error_returns_error_envelope(mock_config):
+    """server 返回 isError 的结果必须落进 error 信封，不能伪装成 success。"""
+    provider = MCPProvider()
+    try:
+        await provider.connect_all([mock_config])
+        result = await provider.call_tool("test-server", "boom", {})
+        assert result.status == "error"
+        assert "kaboom" in result.error
     finally:
         await provider.close_all()
 

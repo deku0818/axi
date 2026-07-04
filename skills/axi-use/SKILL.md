@@ -1,6 +1,6 @@
 ---
 name: axi-use
-description: Discover and invoke tools via the `axi` CLI (or `from axi import tool` in Python). Use whenever the task needs external tool execution — MCP servers, web search, knowledge-base retrieval, registered Python functions — or the user asks to search / describe / run a tool. Core workflow is `axi search <query>` → `axi describe <tool>` → `axi run <tool> --key value`; switch to Python when the task needs loops, aggregation, or post-processing across multiple calls. Use `axi-creator` instead when the task is to add new tools rather than call existing ones.
+description: 通过 `axi` CLI（或在 Python 中使用 `from axi import tool`）发现并调用工具。当任务需要执行外部工具（当前拥有plane任务管理工具）请使用此skill。核心工作流程为：`axi search <query>` → `axi describe <tool>` → `axi run <tool> --key value`；当任务涉及多次调用之间的循环、聚合或后处理时，请优先使用 Python 进行处理。
 ---
 
 # axi — Agent 使用手册
@@ -12,7 +12,7 @@ axi 是当前环境里的工具调用层。有工具需求时，**先 `axi searc
 - 任务需要外部能力：web 搜索、知识库检索、注册过的 Python 函数、任何 MCP server 暴露的工具
 - 用户让你"调用某工具 / 搜索某工具 / 查某工具怎么用"
 
-工具可以来自三种渠道（对使用者透明，直接 `axi search` 就能找到）：`axi.json` 的 `mcpServers` / `nativeTools`，或 Python 包通过 entry_points 自动注册。**没有 `axi.json` 也不影响使用**。
+工具可以来自三种渠道（对使用者透明，直接 `axi search` 就能找到）：`axi.json` 的 `mcpServers` / `nativeTools`，或 Python 包通过 entry_points 自动注册。配置文件位置由 `AXI_CONFIG` 环境变量指定，缺省 `~/.axi/axi.json`——**不会从当前目录自动发现**，项目级配置需要 `export AXI_CONFIG=/path/to/axi.json`。没有配置文件也不影响使用。
 
 ## 三步工作流
 

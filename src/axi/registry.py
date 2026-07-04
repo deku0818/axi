@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from axi.config import SearchConfig
 from axi.models import SearchResult, ToolMeta
 from axi.search.cache import EmbeddingCache
-from axi.search.embedding import EmbeddingProvider
+from axi.search.embedding import EmbeddingProvider, create_embedding_provider
 from axi.search.hybrid import HybridSearch
 from axi.search.regex import RegexSearch
+
+
+def split_names(value: str) -> list[str]:
+    """解析逗号分隔的名称列表，忽略空段。"""
+    return [n.strip() for n in value.split(",") if n.strip()]
 
 
 class ToolResolveError(Exception):
@@ -41,6 +47,17 @@ class Registry:
         )
         self._dirty = True
 
+    @classmethod
+    def from_search_config(cls, cfg: SearchConfig) -> Registry:
+        """按 axi.json 的 search 配置构建带混合搜索的 Registry。"""
+        provider = create_embedding_provider(cfg.embedding)
+        return cls(
+            embedding_provider=provider,
+            embedding_cache=EmbeddingCache() if provider else None,
+            weight_bm25=cfg.weights.bm25,
+            weight_embedding=cfg.weights.embedding,
+        )
+
     def register(self, meta: ToolMeta) -> None:
         """注册一个工具。"""
         self._tools[meta.full_name] = meta
@@ -62,7 +79,9 @@ class Registry:
         if "/" in name:
             meta = self._tools.get(name)
             if meta is None:
-                raise ToolNotFoundError(f"Tool not found: {name}")
+                raise ToolNotFoundError(
+                    f"Tool not found: {name}. Use search to discover available tools."
+                )
             return meta
 
         matches = [t for t in self._tools.values() if t.name == name]
@@ -71,9 +90,11 @@ class Registry:
         if len(matches) > 1:
             candidates = ", ".join(t.full_name for t in matches)
             raise AmbiguousToolError(
-                f"Ambiguous tool name '{name}', candidates: {candidates}"
+                f"Ambiguous tool name '{name}'. Use a full name: {candidates}"
             )
-        raise ToolNotFoundError(f"Tool not found: {name}")
+        raise ToolNotFoundError(
+            f"Tool not found: {name}. Use search to discover available tools."
+        )
 
     def list_all(self) -> list[ToolMeta]:
         """列出所有工具。"""

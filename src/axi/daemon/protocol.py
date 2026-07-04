@@ -1,16 +1,20 @@
 """daemon 通信协议：JSON 行格式的请求/响应。"""
 
+import hashlib
 import os
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from axi.config import CONFIG_PATH
 from axi.models import ResultEnvelope
 
-# Unix socket 路径
-SOCKET_DIR = os.path.expanduser("~/.axi")
-SOCKET_PATH = os.path.join(SOCKET_DIR, "daemon.sock")
-PID_PATH = os.path.join(SOCKET_DIR, "daemon.pid")
+# 每份配置对应一个独立 daemon，socket/pid/log 按配置路径 hash 隔离
+SOCKET_DIR = os.path.expanduser("~/.axi/daemons")
+_CONFIG_HASH = hashlib.sha256(str(CONFIG_PATH).encode()).hexdigest()[:12]
+SOCKET_PATH = os.path.join(SOCKET_DIR, f"{_CONFIG_HASH}.sock")
+PID_PATH = os.path.join(SOCKET_DIR, f"{_CONFIG_HASH}.pid")
+LOG_PATH = os.path.join(SOCKET_DIR, f"{_CONFIG_HASH}.log")
 
 
 class DaemonRequest(BaseModel):
@@ -29,6 +33,7 @@ class DaemonStatus(BaseModel):
     """daemon 状态信息。"""
 
     pid: int = Field(description="进程 ID")
+    config_path: str = Field(description="daemon 服务的配置文件路径")
     uptime_seconds: int = Field(description="运行时长（秒）")
     idle_seconds: int = Field(description="空闲时长（秒）")
     idle_timeout_seconds: int = Field(description="空闲超时阈值（秒）")

@@ -19,6 +19,13 @@ from axi.models import RunResult, ToolMeta, ToolSource
 logger = logging.getLogger(__name__)
 
 
+class MCPToolError(Exception):
+    """MCP server 返回的工具级错误（isError=true）。
+
+    区别于连接层异常：工具级错误不应触发重连重试。
+    """
+
+
 class MCPServerConfig(MCPServerBaseConfig):
     """运行时 MCP server 配置，增加 server 名称和 transport 校验。"""
 
@@ -86,7 +93,7 @@ class MCPConnection:
         return tools
 
     async def call_tool(self, tool_name: str, params: dict[str, Any]) -> Any:
-        """调用工具。"""
+        """调用工具。server 返回 isError 时抛 MCPToolError。"""
         if not self.session:
             raise RuntimeError("Not connected")
 
@@ -98,6 +105,9 @@ class MCPConnection:
                 contents.append(block.text)
             else:
                 contents.append(str(block))
+
+        if result.isError:
+            raise MCPToolError("\n".join(contents) or "Unknown tool error")
 
         if len(contents) == 1:
             # 尝试解析为 JSON
@@ -151,11 +161,20 @@ class MCPProvider:
         """路由到对应 MCP server 执行工具。失败时尝试重连一次。"""
         conn = self._connections.get(server)
         if not conn:
-            return RunResult.fail(f"MCP server not connected: {server}")
+            return RunResult.fail(
+                f"MCP server not connected: {server}. "
+                "It failed to start with the daemon; check daemon log for the cause."
+            )
+
+        async def _call() -> RunResult:
+            """工具级错误（isError）就地转 error 信封，不参与重连重试。"""
+            try:
+                return RunResult.success(await conn.call_tool(tool_name, params))
+            except MCPToolError as e:
+                return RunResult.fail(str(e))
 
         try:
-            result = await conn.call_tool(tool_name, params)
-            return RunResult.success(result)
+            return await _call()
         except Exception as e:
             logger.warning(
                 "Tool call '%s/%s' failed, attempting reconnect: %s",
@@ -166,9 +185,9 @@ class MCPProvider:
             try:
                 await conn.close()
                 await conn.connect()
-                result = await conn.call_tool(tool_name, params)
+                result = await _call()
                 logger.info("Reconnect to '%s' succeeded", server)
-                return RunResult.success(result)
+                return result
             except Exception as retry_err:
                 logger.exception("Reconnect to '%s' failed", server)
                 return RunResult.fail(

@@ -6,8 +6,11 @@ import os
 import signal
 import time
 from collections import Counter
+from typing import Any
 
-from axi.config import app_config
+import jsonschema
+
+from axi.config import CONFIG_PATH, app_config
 from axi.daemon.protocol import (
     SOCKET_DIR,
     SOCKET_PATH,
@@ -19,12 +22,60 @@ from axi.daemon.protocol import (
 from axi.models import ToolSource
 from axi.providers.mcp import MCPProvider
 from axi.registry import Registry, ToolResolveError
-from axi.search.cache import EmbeddingCache
-from axi.search.embedding import create_embedding_provider
 
 logger = logging.getLogger(__name__)
 
 _IDLE_EXEMPT_METHODS = frozenset({"status", "shutdown"})
+
+
+def _allowed_types(prop: dict) -> set[str]:
+    """提取属性 schema 允许的原始类型，覆盖 type 为字符串/列表及 anyOf 分支。"""
+    types: set[str] = set()
+    t = prop.get("type")
+    if isinstance(t, str):
+        types.add(t)
+    elif isinstance(t, list):
+        types.update(x for x in t if isinstance(x, str))
+    for branch in prop.get("anyOf", []):
+        if isinstance(branch, dict):
+            types |= _allowed_types(branch)
+    return types
+
+
+def _coerce_to_schema(params: dict, schema: dict) -> dict:
+    """按 schema 顶层类型做轻量转换，弥合 CLI 参数解析的类型猜测与严格校验的间隙。
+
+    只处理无歧义的方向：数字 → string（``--message 42``），
+    可解析的字符串 → integer/number/boolean（``--port 08080``）。
+    目标类型本身就合法时不动（如 anyOf 同时允许 string 和 integer）。
+    """
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return params
+    coerced = dict(params)
+    for key, value in params.items():
+        prop = props.get(key)
+        if not isinstance(prop, dict):
+            continue
+        allowed = _allowed_types(prop)
+        if (
+            "string" in allowed
+            and not ({"integer", "number"} & allowed)
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        ):
+            coerced[key] = str(value)
+        elif "string" not in allowed and isinstance(value, str):
+            try:
+                if "integer" in allowed:
+                    coerced[key] = int(value)
+                elif "number" in allowed:
+                    coerced[key] = float(value)
+                elif "boolean" in allowed and value.lower() in ("true", "false"):
+                    coerced[key] = value.lower() == "true"
+            except ValueError:
+                pass
+    return coerced
 
 
 class DaemonServer:
@@ -37,20 +88,10 @@ class DaemonServer:
         self._last_activity: float = time.monotonic()
         self._watchdog_task: asyncio.Task | None = None
 
-        # 根据配置初始化搜索
-        search_cfg = app_config.search
-        embedding_cfg = search_cfg.embedding
-        embedding_provider = create_embedding_provider(embedding_cfg)
-        embedding_cache = EmbeddingCache() if embedding_provider else None
-
         self._idle_timeout: float = app_config.daemon.idle_timeout_minutes * 60
-
-        self.registry = Registry(
-            embedding_provider=embedding_provider,
-            embedding_cache=embedding_cache,
-            weight_bm25=search_cfg.weights.bm25,
-            weight_embedding=search_cfg.weights.embedding,
-        )
+        self.registry = Registry.from_search_config(app_config.search)
+        # 按工具缓存编译后的 jsonschema validator；schema 不合法的缓存 None
+        self._validators: dict[str, Any] = {}
 
     async def start(self) -> None:
         """启动 daemon：连接 MCP server，监听 Unix socket。"""
@@ -159,6 +200,20 @@ class DaemonServer:
         finally:
             writer.close()
 
+    def _get_validator(self, full_name: str, schema: dict) -> Any | None:
+        """获取（并缓存）工具的 jsonschema validator；schema 为空或不合法时返回 None。"""
+        if full_name not in self._validators:
+            validator = None
+            if schema:
+                try:
+                    cls = jsonschema.validators.validator_for(schema)
+                    cls.check_schema(schema)
+                    validator = cls(schema)
+                except Exception:
+                    pass
+            self._validators[full_name] = validator
+        return self._validators[full_name]
+
     async def _dispatch(self, req: DaemonRequest) -> DaemonResponse:
         """路由请求到对应处理方法。"""
         handler = self._HANDLERS.get(req.method)
@@ -206,9 +261,19 @@ class DaemonServer:
         if not meta.server:
             return DaemonResponse.fail("MCP tool missing server")
 
-        result = await self.mcp_provider.call_tool(
-            meta.server, meta.name, req.params or {}
-        )
+        params = req.params or {}
+        validator = self._get_validator(meta.full_name, meta.input_schema)
+        if validator is not None:
+            params = _coerce_to_schema(params, meta.input_schema)
+            try:
+                validator.validate(params)
+            except jsonschema.ValidationError as e:
+                return DaemonResponse.fail(f"Invalid params: {e.message}")
+            except Exception:
+                # schema 本身有问题（$ref 解析失败等），不拦调用
+                pass
+
+        result = await self.mcp_provider.call_tool(meta.server, meta.name, params)
         if result.status == "success":
             return DaemonResponse.success(result.data)
         return DaemonResponse.fail(result.error or "Unknown error")
@@ -230,6 +295,7 @@ class DaemonServer:
 
         status = DaemonStatus(
             pid=os.getpid(),
+            config_path=str(CONFIG_PATH),
             uptime_seconds=int(uptime),
             idle_seconds=int(idle),
             idle_timeout_seconds=int(self._idle_timeout),

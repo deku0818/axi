@@ -64,14 +64,11 @@ def tool(
 
 def _make_daemon_caller(tool_name: str) -> Callable:
     """创建通过 daemon 调用 MCP 工具的 PTC 函数。"""
-    from axi.daemon.client import ensure_daemon, send_request
+    from axi.daemon.client import daemon_request
     from axi.daemon.protocol import DaemonRequest
 
     def _daemon_caller(**kwargs: Any) -> Any:
-        if not ensure_daemon():
-            raise RuntimeError("Daemon is not running. Start it with: axi daemon start")
-
-        resp = send_request(
+        resp = daemon_request(
             DaemonRequest(method="call_tool", tool_name=tool_name, params=kwargs)
         )
         if resp.status == "error":

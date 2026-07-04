@@ -34,6 +34,11 @@ async def list_tools():
                 "required": ["a", "b"],
             },
         ),
+        Tool(
+            name="boom",
+            description="Always fails with a tool-level error",
+            inputSchema={"type": "object", "properties": {}},
+        ),
     ]
 
 
@@ -46,6 +51,8 @@ async def call_tool(name: str, arguments: dict):
     elif name == "add":
         result = arguments["a"] + arguments["b"]
         return [TextContent(type="text", text=str(result))]
+    elif name == "boom":
+        raise RuntimeError("kaboom")
     else:
         raise ValueError(f"Unknown tool: {name}")
 

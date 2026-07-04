@@ -9,38 +9,53 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, get_type_hints
 
-from pydantic import create_model
+from pydantic import BaseModel, ConfigDict, create_model
 
 from axi.config import NativeToolEntry, app_config
 from axi.models import ToolMeta, ToolSource
 
 logger = logging.getLogger(__name__)
 
-# 全局注册表，存储原生工具的函数引用
+# 全局注册表，存储原生工具的函数引用和参数模型
 _native_functions: dict[str, Callable] = {}
+_native_models: dict[str, type[BaseModel]] = {}
 
 
 # ── 工具注册（@tool 装饰器的执行层）────────────────────────────
 
 
-def _extract_input_schema(func: Callable) -> dict[str, Any]:
-    """从函数签名和 type hints 提取 JSON Schema。
+def _build_params_model(func: Callable) -> type[BaseModel]:
+    """从函数签名和 type hints 构建参数模型。
 
-    利用 Pydantic 的 create_model 动态构建模型，
+    利用 Pydantic 的 create_model 动态构建，
     自动支持 Literal、Optional、list[T]、嵌套 BaseModel、Annotated[..., Field()] 等。
+    ``*args``/``**kwargs`` 不入模型；有 ``**kwargs`` 时放行多余字段（由它吸收）。
+    ``coerce_numbers_to_str`` 弥合 CLI 参数解析的类型猜测（``--name 42`` → "42"）。
     """
     hints = get_type_hints(func, include_extras=True)
     sig = inspect.signature(func)
     fields: dict[str, Any] = {}
+    var_params = (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+    has_var_kw = False
 
     for name, param in sig.parameters.items():
+        if param.kind in var_params:
+            has_var_kw = has_var_kw or param.kind is inspect.Parameter.VAR_KEYWORD
+            continue
         hint = hints.get(name, Any)
         if param.default is inspect.Parameter.empty:
             fields[name] = (hint, ...)
         else:
             fields[name] = (hint, param.default)
 
-    model = create_model(func.__name__, **fields)
+    config = ConfigDict(
+        extra="allow" if has_var_kw else "forbid", coerce_numbers_to_str=True
+    )
+    return create_model(func.__name__, __config__=config, **fields)
+
+
+def _extract_input_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """从参数模型导出 JSON Schema。"""
     schema = model.model_json_schema()
 
     # 移除 Pydantic 自动添加的 title 字段，保持输出紧凑
@@ -60,22 +75,41 @@ def register_tool(
     """注册一个原生 Python 函数为 axi 工具。"""
     tool_name = name or func.__name__
     tool_desc = description or func.__doc__ or ""
+    model = _build_params_model(func)
 
     meta = ToolMeta(
         name=tool_name,
         description=tool_desc,
-        input_schema=_extract_input_schema(func),
+        input_schema=_extract_input_schema(model),
         output_example=output_example,
         source=ToolSource.NATIVE,
     )
 
     _native_functions[tool_name] = func
+    _native_models[tool_name] = model
     return meta
 
 
 def get_native_function(name: str) -> Callable | None:
     """获取已注册的原生函数。"""
     return _native_functions.get(name)
+
+
+def validate_native_params(name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """按参数模型校验并转换入参，返回仅含调用方提供字段的 dict。
+
+    校验失败抛 pydantic.ValidationError。转换让 CLI 传入的字符串
+    变成目标类型（"3" → 3），嵌套 dict 变成对应的 BaseModel 实例。
+    """
+    validated = _native_models[name].model_validate(params)
+    return {k: getattr(validated, k) for k in validated.model_fields_set}
+
+
+def _rekey_native_tool(old_name: str, new_name: str) -> None:
+    """工具归入 server 后同步更新函数/模型注册键，与 registry 的 full_name 保持一致。"""
+    if old_name in _native_functions:
+        _native_functions[new_name] = _native_functions.pop(old_name)
+        _native_models[new_name] = _native_models.pop(old_name)
 
 
 # ── 模块发现与加载 ─────────────────────────────────────────────
@@ -148,6 +182,7 @@ def _load_native_entry(
     loaded[module] = server_name
     for name in new_names:
         registry.set_server(name, server_name)
+        _rekey_native_tool(name, f"{server_name}/{name}")
 
 
 def load_native_tool_modules() -> None:

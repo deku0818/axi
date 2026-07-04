@@ -7,7 +7,9 @@ import subprocess
 import sys
 import time
 
+from axi.config import CONFIG_PATH
 from axi.daemon.protocol import (
+    LOG_PATH,
     SOCKET_DIR,
     SOCKET_PATH,
     PID_PATH,
@@ -16,8 +18,6 @@ from axi.daemon.protocol import (
 )
 
 logger = logging.getLogger(__name__)
-
-DAEMON_LOG_PATH = os.path.join(SOCKET_DIR, "daemon.log")
 
 _DAEMON_START_POLL_RETRIES = 30
 _DAEMON_START_POLL_INTERVAL = 0.1  # seconds
@@ -45,25 +45,33 @@ def ensure_daemon() -> bool:
 
     os.makedirs(SOCKET_DIR, exist_ok=True)
 
-    with open(DAEMON_LOG_PATH, "a") as log_file:
+    with open(LOG_PATH, "a") as log_file:
         subprocess.Popen(
             [sys.executable, "-m", "axi.daemon.server"],
             stdout=log_file,
             stderr=log_file,
             start_new_session=True,
+            env={**os.environ, "AXI_CONFIG": str(CONFIG_PATH)},
         )
 
     for _ in range(_DAEMON_START_POLL_RETRIES):
         time.sleep(_DAEMON_START_POLL_INTERVAL)
         if is_daemon_running():
             return True
-    logger.error("Daemon failed to start. Check log: %s", DAEMON_LOG_PATH)
+    logger.error("Daemon failed to start. Check log: %s", LOG_PATH)
     return False
 
 
 def send_request(req: DaemonRequest) -> DaemonResponse:
     """向 daemon 发送请求并获取响应。"""
     return asyncio.run(_send(req))
+
+
+def daemon_request(req: DaemonRequest) -> DaemonResponse:
+    """确保 daemon 已启动后发送请求。所有入口（CLI/PTC/MCP serve）统一走这里。"""
+    if not ensure_daemon():
+        return DaemonResponse.fail(f"Failed to start axi daemon. Check log: {LOG_PATH}")
+    return send_request(req)
 
 
 async def _send(req: DaemonRequest) -> DaemonResponse:

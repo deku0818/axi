@@ -34,7 +34,7 @@ axi run jina/jina_search --query "hello world" --count 3
 
 ## 配置
 
-在项目根目录创建 `axi.json`（参考 `axi.json.example`）：
+配置文件默认为 `~/.axi/axi.json`；项目级配置通过 `AXI_CONFIG` 环境变量指定（如 `export AXI_CONFIG=/path/to/project/axi.json`，或写进 direnv 的 `.envrc`）。每份配置对应一个独立的 daemon，多项目互不干扰。格式参考 `axi.json.example`：
 
 ```json
 {
@@ -79,6 +79,7 @@ axi run jina/jina_search --query "hello world" --count 3
 | `axi grep <pattern>` | 正则表达式搜索工具（支持 `--limit/-l`） |
 | `axi describe <tool>` | 查看工具完整 schema |
 | `axi run <tool> --key value` | 执行工具（也支持 `-j '{...}'` 传 JSON） |
+| `axi mcp` | 将 axi 工具导出为 MCP server（stdio / HTTP） |
 | `axi daemon start` | 手动启动 daemon（通常无需手动，CLI 会自动拉起） |
 | `axi daemon status` | 查看 daemon 状态（PID、运行时长、空闲时长、工具数量等） |
 | `axi daemon stop` | 手动停止 daemon |
@@ -113,6 +114,37 @@ search = tool("jina/jina_search")
 results = search(query="python async", count=5)
 ```
 
+## 导出为 MCP server
+
+用 axi 封装的工具写一次，既能 CLI 调用，也能一条命令变成 MCP server 给任何 MCP 客户端（Claude Desktop、Claude Code 等）使用：
+
+```bash
+axi mcp                                  # 全部工具，元工具模式（search/grep/describe/run）
+axi mcp --server mytools                 # 只暴露一组工具，平铺模式
+axi mcp --server a,b --transport http --port 8321   # HTTP 长驻服务
+```
+
+两种暴露形态（互斥）：
+
+- **平铺**（指定 `--server` 时默认）— 每个工具注册为独立 MCP tool，对端直接看到并调用。单 server 用裸工具名，多 server 加 `server__` 前缀
+- **元工具**（全量导出时默认）— 只暴露 `search` / `grep` / `describe` / `run` 四个工具，对端以渐进式披露的方式发现和调用，上下文占用恒定，工具再多也不吃 context
+
+`--flat` / `--meta` 可强制覆盖默认判定。
+
+MCP 客户端配置示例（stdio 由客户端拉起，用 `AXI_CONFIG` 锚定项目）：
+
+```json
+{
+  "mcpServers": {
+    "my-tools": {
+      "command": "axi",
+      "args": ["mcp", "--server", "mytools"],
+      "env": { "AXI_CONFIG": "/path/to/project/axi.json" }
+    }
+  }
+}
+```
+
 ## 搜索
 
 axi 提供两种搜索方式：
@@ -140,7 +172,7 @@ axi CLI ──(Unix socket)──> daemon ──(stdio)──> MCP server A
 | 阶段 | 行为 |
 |------|------|
 | **启动** | 加载 `axi.json` → 连接所有 MCP server → 创建 Unix socket → 写入 PID 文件 → 启动 idle watchdog |
-| **运行** | 通过 `~/.axi/daemon.sock` 监听请求，路由到对应 MCP server 执行 |
+| **运行** | 通过 `~/.axi/daemons/<hash>.sock` 监听请求，路由到对应 MCP server 执行 |
 | **空闲关闭** | 默认 30 分钟无活动自动关闭（每 60 秒检查一次；`status` 和 `shutdown` 请求不重置计时器） |
 | **手动关闭** | `axi daemon stop` 发送关闭指令，daemon 优雅退出 |
 | **信号关闭** | 收到 SIGTERM / SIGINT 时优雅关闭（清理 socket 和 PID 文件） |
@@ -165,6 +197,7 @@ axi daemon stop      # 手动停止
 {
   "status": "running",
   "pid": 12345,
+  "config_path": "/path/to/project/axi.json",
   "uptime_seconds": 1800,
   "idle_seconds": 120,
   "idle_timeout_seconds": 1800,
@@ -176,13 +209,15 @@ axi daemon stop      # 手动停止
 
 ### 文件位置
 
-daemon 运行时文件位于 `~/.axi/`：
+daemon 按配置文件隔离：每份 `AXI_CONFIG` 对应一个独立 daemon，运行时文件位于 `~/.axi/daemons/`，文件名为配置文件绝对路径的哈希：
 
 | 文件 | 说明 |
 |------|------|
-| `daemon.sock` | Unix socket，CLI 与 daemon 的通信通道 |
-| `daemon.pid` | daemon 进程 PID，用于检测是否存活 |
-| `daemon.log` | daemon 启动和错误日志 |
+| `<hash>.sock` | Unix socket，CLI 与 daemon 的通信通道 |
+| `<hash>.pid` | daemon 进程 PID，用于检测是否存活 |
+| `<hash>.log` | daemon 启动和错误日志 |
+
+`axi daemon status` 的 `config_path` 字段显示当前 daemon 服务的配置文件。
 
 ## 技术栈
 

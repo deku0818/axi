@@ -1,6 +1,6 @@
 ---
 name: axi-creator
-description: Expose an existing capability (Python function, HTTP API, third-party SDK, or MCP server) as an axi tool. Use when the user wants to "add a tool to axi", "wrap an API for axi", "register a function", "make X callable via `axi run`", or needs to build a new `@tool` / configure `mcpServers` / publish a native-tool package. Covers decorator usage, schema quality via type hints, registration via `axi.json` vs `pyproject.toml` entry_points, and end-to-end self-verification. Use `axi-use` instead when the task is to call existing tools rather than register new ones.
+description: Expose an existing capability (Python function, HTTP API, third-party SDK, or MCP server) as an axi tool, or export registered axi tools as an MCP server. Use when the user wants to "add a tool to axi", "wrap an API for axi", "register a function", "make X callable via `axi run`", "expose these tools over MCP / hook them to Claude Desktop" (`axi mcp`), or needs to build a new `@tool` / configure `mcpServers` / publish a native-tool package. Covers decorator usage, schema quality via type hints, registration via `axi.json` vs `pyproject.toml` entry_points, MCP export, and end-to-end self-verification. Use `axi-use` instead when the task is to call existing tools rather than register new ones.
 ---
 
 # axi — 工具接入手册
@@ -77,6 +77,8 @@ def get_can_data(
 }
 ```
 
+`axi.json` 是 `AXI_CONFIG` 环境变量指向的文件（缺省 `~/.axi/axi.json`，**不会从当前目录发现**）。项目级配置在项目里放一份 axi.json 并 `export AXI_CONFIG=/path/to/axi.json`（direnv 最省事）。
+
 **方式 2：分发给别人用 → pip 包 + `pyproject.toml` entry_points**
 
 ```toml
@@ -92,7 +94,7 @@ smartlink = "smartlink_axi.tools"
 
 ## Path B：接入已有 MCP server
 
-编辑项目根目录 `axi.json`：
+编辑 `AXI_CONFIG` 指向的 `axi.json`（缺省 `~/.axi/axi.json`）：
 
 ```json
 {
@@ -124,6 +126,34 @@ axi run <server>/<tool> --key value          # 跑通，返回 {"status":"succes
 ```
 
 **搜不到比跑不通更常见**——description 太短、只写了类名或方法名都会导致 BM25/Embedding 召回差。看着 `axi search` 返回列表里有没有你的工具，score 是不是高位。
+
+---
+
+## 导出为 MCP server（写一次，CLI + MCP 两用）
+
+注册进 axi 的工具（native 和 MCP 都行）可以一条命令变成 MCP server，挂给 Claude Desktop / Claude Code 等任何 MCP 客户端：
+
+```bash
+axi mcp --server my_tools    # 平铺：每个工具是独立 MCP tool（单 server 用裸名，多 server 加 server__ 前缀）
+axi mcp                      # 元工具：只暴露 search/grep/describe/run 四个工具，工具再多也不吃对端 context
+axi mcp --server a,b --transport http --port 8321    # HTTP 长驻服务
+```
+
+缺省形态自动判定：指定了 `--server` → 平铺，全量 → 元工具；`--flat` / `--meta` 强制覆盖。
+
+客户端配置示例——stdio 进程由客户端拉起、cwd 不可控，**必须在 env 里用 `AXI_CONFIG` 锚定配置**：
+
+```json
+{
+  "mcpServers": {
+    "my-tools": {
+      "command": "axi",
+      "args": ["mcp", "--server", "my_tools"],
+      "env": { "AXI_CONFIG": "/path/to/axi.json" }
+    }
+  }
+}
+```
 
 ---
 

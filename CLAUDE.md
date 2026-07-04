@@ -68,6 +68,7 @@ src/axi/
 - **MCP 走 daemon**：MCP 工具一律通过 daemon 执行，不在 CLI 进程内直连
 - **原生走进程内**：`@tool` 注册的原生工具在 CLI 进程内直接执行
 - **搜索可插拔**：BM25 + Embedding 混合搜索为默认（`search` 命令），正则为独立的 `grep` 命令
+- **提示面向 Agent**：所有错误信息和输出提示的读者是模型，不是人。标准：一句话说清哪里错 + 给出可执行的下一步（如 "Tool not found: X. Use search to discover available tools."）；不堆栈、不啰嗦、保持英文
 
 ### 命名约定
 

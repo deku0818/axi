@@ -3,18 +3,36 @@
 import json
 import logging
 from collections import Counter
+from enum import Enum
 
 import typer
 from pydantic import BaseModel
 
 from axi.config import app_config
-from axi.daemon.client import ensure_daemon, is_daemon_running, send_request
-from axi.daemon.protocol import DaemonRequest, DaemonResponse
+from axi.daemon.client import (
+    LOG_PATH,
+    daemon_request,
+    ensure_daemon,
+    is_daemon_running,
+    send_request,
+)
+from axi.daemon.protocol import DaemonRequest
 from axi.executor import Executor
 from axi.models import RunResult, SearchResult
-from axi.registry import AmbiguousToolError, Registry, ToolNotFoundError
+from axi.registry import (
+    AmbiguousToolError,
+    Registry,
+    ToolNotFoundError,
+    split_names,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class Transport(str, Enum):
+    stdio = "stdio"
+    http = "http"
+
 
 app = typer.Typer(
     name="axi",
@@ -63,15 +81,6 @@ def _output_json(data: object) -> None:
     typer.echo(json.dumps(d, ensure_ascii=False))
 
 
-def _daemon_request(req: DaemonRequest) -> DaemonResponse:
-    """向 daemon 发送请求。如果 daemon 未运行则自动启动。"""
-    if not ensure_daemon():
-        return DaemonResponse.fail(
-            "Daemon is not running. Start it with: axi daemon start"
-        )
-    return send_request(req)
-
-
 # ── daemon 管理命令 ──────────────────────────────────────────────
 
 
@@ -85,7 +94,7 @@ def daemon_start() -> None:
     if ensure_daemon():
         typer.echo("Daemon started.")
     else:
-        typer.echo("Failed to start daemon.")
+        typer.echo(f"Failed to start daemon. Check log: {LOG_PATH}", err=True)
         raise typer.Exit(code=1)
 
 
@@ -144,9 +153,7 @@ def _search_and_merge(
 ) -> None:
     """执行 daemon 搜索，合并本地和远程结果后输出 JSON。"""
     mcp_results: list[dict] = []
-    resp = _daemon_request(
-        DaemonRequest(method=daemon_method, query=query, top_k=top_k)
-    )
+    resp = daemon_request(DaemonRequest(method=daemon_method, query=query, top_k=top_k))
     if resp.status == "success" and resp.data:
         mcp_results = resp.data
     elif resp.status == "error":
@@ -196,7 +203,7 @@ def _collect_tool_groups() -> dict[str | None, list[dict]]:
 
     # MCP 工具（通过 daemon）
     mcp_tools: list[dict] = []
-    resp = _daemon_request(DaemonRequest(method="list_tools"))
+    resp = daemon_request(DaemonRequest(method="list_tools"))
     if resp.status == "success" and resp.data:
         mcp_tools = resp.data
         for t in mcp_tools:
@@ -218,11 +225,14 @@ def _filter_groups(
     groups: dict[str | None, list[dict]], server_name: str
 ) -> dict[str, list[dict]]:
     """按逗号分隔的 server 名过滤分组。未找到时抛 typer.Exit。"""
-    names = [n.strip() for n in server_name.split(",") if n.strip()]
+    names = split_names(server_name)
     filtered = {k: v for k, v in groups.items() if k in names}
     if not filtered:
         missing = [n for n in names if n not in groups]
-        _output_json({"error": f"Server not found: {', '.join(missing)}"})
+        available = ", ".join(sorted(k for k in groups if k))
+        _output_json(
+            {"error": f"Server not found: {', '.join(missing)}. Available: {available}"}
+        )
         raise typer.Exit(code=1)
     return filtered
 
@@ -270,7 +280,7 @@ def _resolve_tool(name: str) -> dict:
     except ToolNotFoundError:
         pass  # 本地未找到，继续尝试 daemon
 
-    resp = _daemon_request(DaemonRequest(method="describe", tool_name=name))
+    resp = daemon_request(DaemonRequest(method="describe", tool_name=name))
     if resp.status == "success":
         return resp.data
     return {"error": resp.error or f"Tool not found: {name}"}
@@ -281,7 +291,7 @@ def describe(
     tool_name: str = typer.Argument(help="工具完整名称（逗号分隔多个）"),
 ) -> None:
     """查看工具详情。"""
-    names = [n.strip() for n in tool_name.split(",") if n.strip()]
+    names = split_names(tool_name)
     if len(names) == 1:
         result = _resolve_tool(names[0])
         if "error" in result:
@@ -329,13 +339,45 @@ def run(
     except ToolNotFoundError:
         pass  # 本地未找到，继续尝试 daemon
 
-    resp = _daemon_request(
+    resp = daemon_request(
         DaemonRequest(method="call_tool", tool_name=tool_name, params=parsed)
     )
     if resp.status == "success":
         _output_json(RunResult.success(resp.data))
     else:
         _output_json(RunResult.fail(resp.error or "Unknown error"))
+
+
+@app.command("mcp")
+def mcp_command(
+    transport: Transport = typer.Option(
+        Transport.stdio, "--transport", help="传输方式"
+    ),
+    server: str | None = typer.Option(
+        None, "--server", help="只暴露指定 server 的工具（逗号分隔多个）"
+    ),
+    flat: bool | None = typer.Option(
+        None,
+        "--flat/--meta",
+        help="平铺每个工具 / 只暴露 search、grep、describe、run 元工具；"
+        "缺省自动：指定了 --server 则平铺，否则元工具",
+    ),
+    port: int = typer.Option(8321, "--port", help="HTTP 端口"),
+    host: str = typer.Option("127.0.0.1", "--host", help="HTTP 监听地址"),
+) -> None:
+    """将 axi 工具导出为 MCP server。"""
+    from axi import mcp_serve
+
+    if flat is None:
+        flat = server is not None
+    mcp_serve.serve(
+        native_metas=_registry.list_all(),
+        transport=transport.value,
+        servers=server,
+        flat=flat,
+        host=host,
+        port=port,
+    )
 
 
 # ── 参数解析辅助函数 ──────────────────────────────────────────────

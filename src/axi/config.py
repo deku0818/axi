@@ -3,13 +3,16 @@
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(os.environ.get("AXI_CONFIG", "axi.json"))
+CONFIG_PATH = (
+    Path(os.environ.get("AXI_CONFIG", "~/.axi/axi.json")).expanduser().resolve()
+)
 
 
 # ── 子配置模型 ──────────────────────────────────────────────
@@ -127,8 +130,19 @@ def load_config(path: Path) -> AxiConfig:
         raise SystemExit(f"Error: Invalid config in {path}: {e}")
 
 
+def _warn_ignored_local_config() -> None:
+    """0.0.6 起不再读 cwd 的 axi.json；发现被忽略的本地配置时给出迁移提示。"""
+    if "AXI_CONFIG" not in os.environ and Path("axi.json").is_file():
+        print(
+            "Warning: ./axi.json found but ignored (axi now reads "
+            f"{CONFIG_PATH}). Set AXI_CONFIG=./axi.json to use it.",
+            file=sys.stderr,
+        )
+
+
 def _load_app_config() -> AxiConfig:
     """延迟加载配置，捕获异常并输出友好信息。"""
+    _warn_ignored_local_config()
     try:
         return load_config(CONFIG_PATH)
     except SystemExit:

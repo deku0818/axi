@@ -143,3 +143,17 @@ def test_schema_field_constraints():
     assert page.get("minimum") == 1
     assert page.get("maximum") == 100
     assert page.get("description") == "页码"
+
+
+def test_warn_ignored_local_config(tmp_path, monkeypatch, capsys):
+    """cwd 有 axi.json 但未设 AXI_CONFIG 时输出迁移提示。"""
+    from axi.config import _warn_ignored_local_config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AXI_CONFIG", raising=False)
+    _warn_ignored_local_config()
+    assert capsys.readouterr().err == ""
+
+    (tmp_path / "axi.json").write_text("{}")
+    _warn_ignored_local_config()
+    assert "ignored" in capsys.readouterr().err
