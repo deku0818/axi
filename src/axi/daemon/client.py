@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 _DAEMON_START_POLL_RETRIES = 30
 _DAEMON_START_POLL_INTERVAL = 0.1  # seconds
 
+# StreamReader 缓冲区上限。默认 64KB 放不下完整工具列表（list/search 的响应是单行
+# JSON，工具多时轻松超过 64KB），会抛 asyncio.LimitOverrunError。调大到 8MB。
+_STREAM_LIMIT = 8 * 1024 * 1024
+
 
 def is_daemon_running() -> bool:
     """检查 daemon 是否在运行。"""
@@ -92,7 +96,9 @@ def daemon_request(req: DaemonRequest) -> DaemonResponse:
 
 async def _send(req: DaemonRequest) -> DaemonResponse:
     try:
-        reader, writer = await asyncio.open_unix_connection(SOCKET_PATH)
+        reader, writer = await asyncio.open_unix_connection(
+            SOCKET_PATH, limit=_STREAM_LIMIT
+        )
     except OSError as e:
         return DaemonResponse.fail(
             f"Cannot connect to daemon: {e}. Try: axi daemon stop && axi daemon start"
