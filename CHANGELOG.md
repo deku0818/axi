@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.9] - 2026-07-07
+
+### Fixed
+- daemon Unix socket 的 StreamReader 读缓冲从默认 64KB 调大至 8MB：工具数量多时 `axi list` / `axi search` 响应超过单行缓冲上限触发 `LimitOverrunError`，现可正常返回
+
 ## [0.0.8] - 2026-07-07
 
 ### Added
