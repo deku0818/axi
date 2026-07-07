@@ -18,6 +18,7 @@ import mcp.types as types
 from mcp.server.lowlevel import Server
 
 from axi.config import app_config
+from axi.context import set_request_env
 from axi.daemon.client import daemon_request
 from axi.daemon.protocol import LOG_PATH, DaemonRequest
 from axi.executor import Executor
@@ -87,9 +88,17 @@ def build_registry(
 
 
 async def _execute(
-    registry: Registry, executor: Executor, name: str, params: dict[str, Any]
+    server: Server,
+    registry: Registry,
+    executor: Executor,
+    name: str,
+    params: dict[str, Any],
 ) -> RunResult:
     """按来源分发执行：native 进程内，MCP 转发 daemon。
+
+    native 执行前把当前 HTTP 请求的 Axi-* header 写入请求级变量
+    （stdio 无请求对象，置空）；MCP 工具在 daemon 进程执行，读不到
+    contextvar，不捕获。
 
     Executor.run 与 send_request 内部都会 asyncio.run，
     必须放到 worker 线程执行以避免嵌套事件循环。
@@ -100,6 +109,8 @@ async def _execute(
         return RunResult.fail(str(e))
 
     if meta.source == ToolSource.NATIVE:
+        request = server.request_context.request
+        set_request_env(request.headers if request else None)
         return await asyncio.to_thread(executor.run, meta.full_name, params)
 
     # daemon_request 内含 ensure_daemon：daemon idle 自杀后长驻 serve 进程可自动重启它
@@ -174,7 +185,7 @@ def _build_flat_server(registry: Registry, executor: Executor) -> Server:
             raise ValueError(
                 f"Unknown tool: {name}. Call tools/list to see the available tools."
             )
-        result = await _execute(registry, executor, full_name, arguments)
+        result = await _execute(server, registry, executor, full_name, arguments)
         if result.status == "error":
             raise RuntimeError(result.error)
         return _text(result.data)
@@ -269,7 +280,11 @@ def _build_meta_server(registry: Registry, executor: Executor) -> Server:
             return _text(out[0] if len(out) == 1 else out)
         if name == "run":
             result = await _execute(
-                registry, executor, arguments["name"], arguments.get("params") or {}
+                server,
+                registry,
+                executor,
+                arguments["name"],
+                arguments.get("params") or {},
             )
             return _text(result.model_dump(exclude_none=True))
         raise ValueError(

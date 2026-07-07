@@ -57,7 +57,8 @@ MCP server 定义。每个 key 作为 server 命名空间，工具以 `server/to
       "env": { "JINA_API_KEY": "jina_xxx" }
     },
     "retrieval": {
-      "url": "http://localhost:8000/mcp"
+      "url": "http://localhost:8000/mcp",
+      "headers": { "Authorization": "Bearer xxx" }
     }
   }
 }
@@ -69,6 +70,13 @@ MCP server 定义。每个 key 作为 server 命名空间，工具以 `server/to
 | `args` | string[] | 否 | 命令参数，默认 `[]` |
 | `env` | object | 否 | 传递给子进程的环境变量 |
 | `url` | string | 与 `command` 二选一 | HTTP streaming 地址 |
+| `headers` | object | 否 | 随每个 HTTP 请求附带的 header（仅 `url` 型生效），用于远端认证等 |
+
+凭据传递按 transport 选字段：stdio 用 `env`（注入子进程环境），HTTP 用 `headers`（附到每个请求）。
+
+#### 请求级变量：`Axi-*` header 与 `axi.env`
+
+工具经 `axi mcp --transport http` 导出为共享 HTTP server 时，每个客户端可通过 `Axi-<名字>` 请求头传自己的变量（去前缀、`-`→`_`、转大写，如 `Axi-API-KEY` → `API_KEY`），按请求隔离。native 工具内用 `axi.env(name, default=None)` 读取：请求级值优先，其次进程环境变量。CLI / stdio 形态下 `axi.env` 等价于读环境变量。
 
 ---
 

@@ -64,6 +64,21 @@ def get_can_data(
 - 复杂输入用 `BaseModel` 嵌套；axi 会把它展开成 object schema
 - **填 `output_example`**：MCP 协议没有 output schema，原生工具是 axi 独有的优势——Agent 能在 `axi describe` 里直接看到返回形状，不用试跑一遍
 
+### 凭据与配置变量：用 `axi.env`，别用 `os.environ`
+
+工具里需要 API Key 等变量时，一律通过 `axi.env(name, default=None)` 读取：
+
+```python
+import axi
+
+@tool(description="调用上游 API")
+def call_api(query: str) -> dict:
+    key = axi.env("API_KEY")   # CLI/stdio 下读环境变量；HTTP 导出时读客户端 Axi-* header
+    ...
+```
+
+CLI 和 stdio 形态下它就是环境变量；但当工具经 `axi mcp --transport http` 导出为共享 HTTP server 时，每个客户端可通过 `Axi-*` 请求头传自己的变量（见下文"导出为 MCP server"），`axi.env` 会优先取当前请求的值。直接 `os.environ` 的工具在 HTTP 形态下拿不到客户端变量。
+
 ### 注册：两种方式，二选一
 
 **方式 1：本项目内用 → `axi.json` 的 `nativeTools`**
@@ -104,13 +119,14 @@ smartlink = "smartlink_axi.tools"
       "env": {"API_KEY": "xxx"}
     },
     "remote": {
-      "url": "http://localhost:8000/mcp"            // 或 HTTP streaming
+      "url": "http://localhost:8000/mcp",           // 或 HTTP streaming
+      "headers": {"Authorization": "Bearer xxx"}    // 可选：远端要求认证时随每个请求附带
     }
   }
 }
 ```
 
-`command` / `url` 二选一。保存后直接 `axi list` 就能看到新工具——daemon 会按需自动拉起连接。
+`command` / `url` 二选一；凭据传递按 transport 选字段——stdio 用 `env`（注入子进程环境），HTTP 用 `headers`（附到每个请求）。保存后直接 `axi list` 就能看到新工具——daemon 会按需自动拉起连接。
 
 ---
 
@@ -155,6 +171,23 @@ axi mcp --server a,b --transport http --port 8321    # HTTP 长驻服务
 }
 ```
 
+### HTTP 形态下给每个客户端传变量：`Axi-*` header
+
+stdio 是一客户端一进程，变量走 `env` 即可；HTTP 是共享进程，进程环境变量在启动时定死，**每个客户端的变量改走请求头**。约定：`Axi-<名字>` 映射为变量名（去前缀、`-`→`_`、转大写），工具内用 `axi.env` 读取，请求级值优先于进程环境变量：
+
+```json
+{
+  "mcpServers": {
+    "my-tools": {
+      "url": "http://your-host:8321/mcp",
+      "headers": { "Axi-API-KEY": "sk_xxx", "Axi-REGION": "cn" }
+    }
+  }
+}
+```
+
+工具里 `axi.env("API_KEY")` 即得 `sk_xxx`，不同客户端互不可见。注意：这解决的是"客户端带变量进来"，不是服务端准入控制——公网暴露时另需网关层鉴权。
+
 ---
 
 ## 反模式
@@ -163,7 +196,7 @@ axi mcp --server a,b --transport http --port 8321    # HTTP 长驻服务
 - 所有参数都写 `str` — 失去类型约束和枚举提示，Agent 要靠 describe 里的自然语言猜
 - `description` 只写一个词（"搜索"、"查询"）— BM25 召回差、Embedding 语义稀薄
 - 返回不稳定结构（同一工具有时返 list 有时返 dict）— 下游 Agent 没法写聚合逻辑
-- 把敏感配置（API Key）硬编码在 `@tool` 函数里 — 走环境变量或 `mcpServers[...].env`
+- 把敏感配置（API Key）硬编码在 `@tool` 函数里 — 用 `axi.env` 读取（MCP server 的凭据走 `mcpServers[...].env` / `headers`）
 - entry_points 的 value 写成文件路径 `"pkg/tools.py"` — 必须是可 import 的模块路径 `"pkg.tools"`
 
 ---

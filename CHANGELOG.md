@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.8] - 2026-07-07
+
+### Added
+- `axi.env(name, default=None)`：native 工具的统一变量读取入口。CLI / stdio 形态下读进程环境变量；经 `axi mcp --transport http` 导出为共享 HTTP server 时，每个客户端通过 `Axi-*` 请求头传入的变量按请求隔离、优先于进程环境变量（`Axi-Foo-Bar` → `FOO_BAR`：去前缀、`-`→`_`、转大写）
+- `mcpServers` 新增 `headers` 字段：连接需认证的 HTTP MCP server 时随每个请求附带（如 `Authorization: Bearer xxx`）；stdio 型凭据继续走 `env`，两种 transport 各用各的通道
+
+### Fixed
+- MCP 连接建立中途失败（如 `initialize` 报错、远端拒绝认证）不再泄漏已打开的资源（httpx 客户端 / 流 / session）：改用 `AsyncExitStack.pop_all()` 惯用法，全部成功才移交所有权，失败由 with 自动清理
+
 ## [0.0.7] - 2026-07-04
 
 ### Added

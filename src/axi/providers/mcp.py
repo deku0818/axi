@@ -8,6 +8,7 @@ import threading
 from contextlib import AsyncExitStack
 from typing import Any, Self
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -49,27 +50,40 @@ class MCPConnection:
         self._exit_stack: AsyncExitStack | None = None
 
     async def connect(self) -> None:
-        """建立连接并初始化 session。"""
-        self._exit_stack = AsyncExitStack()
-
-        if self.config.url:
-            read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
-                streamable_http_client(self.config.url)
+        """建立连接并初始化 session。中途失败时 with 退出自动清理已打开的资源。"""
+        async with AsyncExitStack() as stack:
+            if self.config.url:
+                http_client = None
+                if self.config.headers:
+                    # 超时与 SDK 默认客户端（create_mcp_http_client）一致：
+                    # 读超时 300s 是 SSE 长调用的存活窗口，不能用整体 30s
+                    http_client = await stack.enter_async_context(
+                        httpx.AsyncClient(
+                            headers=self.config.headers,
+                            timeout=httpx.Timeout(30, read=300),
+                            follow_redirects=True,
+                        )
+                    )
+                read_stream, write_stream, _ = await stack.enter_async_context(
+                    streamable_http_client(self.config.url, http_client=http_client)
+                )
+            else:
+                server_params = StdioServerParameters(
+                    command=self.config.command,
+                    args=self.config.args,
+                    env=self.config.env,
+                )
+                devnull = stack.enter_context(open(os.devnull, "w"))
+                read_stream, write_stream = await stack.enter_async_context(
+                    stdio_client(server_params, errlog=devnull)
+                )
+            session = await stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
             )
-        else:
-            server_params = StdioServerParameters(
-                command=self.config.command,
-                args=self.config.args,
-                env=self.config.env,
-            )
-            devnull = self._exit_stack.enter_context(open(os.devnull, "w"))
-            read_stream, write_stream = await self._exit_stack.enter_async_context(
-                stdio_client(server_params, errlog=devnull)
-            )
-        self.session = await self._exit_stack.enter_async_context(
-            ClientSession(read_stream, write_stream)
-        )
-        await self.session.initialize()
+            await session.initialize()
+            # 全部成功才接管资源所有权；此前任何一步抛出都由 with 清理
+            self._exit_stack = stack.pop_all()
+            self.session = session
 
     async def list_tools(self) -> list[ToolMeta]:
         """获取该 server 的所有工具。"""

@@ -279,9 +279,11 @@ axi CLI ──(Unix socket ~/.axi/daemon.sock)──> axi daemon ──(stdio)�
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | key 名 | 是 | 作为工具命名空间（如 `jina-mcp-tools`） |
-| `command` | 是 | 启动 MCP server 的命令 |
+| `command` | 与 `url` 二选一 | 启动 MCP server 的命令 |
 | `args` | 否 | 命令参数列表 |
-| `env` | 否 | 环境变量 |
+| `env` | 否 | 环境变量（stdio 型的凭据通道） |
+| `url` | 与 `command` 二选一 | HTTP streaming 地址 |
+| `headers` | 否 | 随每个请求附带的 header（HTTP 型的凭据通道） |
 
 配置完成后 axi 自动发现所有 MCP 工具，无需额外操作。工具名格式为 `server/tool_name`。
 

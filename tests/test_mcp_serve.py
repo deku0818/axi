@@ -19,6 +19,7 @@ from axi.providers.mcp import MCPConnection, MCPServerConfig
 RUN_CLI = "from axi.cli import app; app()"
 
 TOOLS_PY = """
+import axi
 from axi import tool
 
 @tool(description="Add two integers")
@@ -28,6 +29,10 @@ def add_nums(a: int, b: int) -> int:
 @tool(description="Greet a person by name")
 def greet(name: str) -> str:
     return f"hi {name}"
+
+@tool(description="Read variable A via axi.env")
+def read_var() -> str:
+    return axi.env("A") or "unset"
 """
 
 
@@ -113,6 +118,7 @@ def serve_env(tmp_path: Path) -> dict[str, str]:
         "AXI_CONFIG": str(config),
         "HOME": str(tmp_path),
         "PATH": os.environ.get("PATH", ""),
+        "A": "from-env",
     }
 
 
@@ -133,10 +139,13 @@ async def test_stdio_flat_mode(serve_env):
     try:
         await conn.connect()
         tools = await conn.list_tools()
-        assert sorted(t.name for t in tools) == ["add_nums", "greet"]
+        assert sorted(t.name for t in tools) == ["add_nums", "greet", "read_var"]
 
         result = await conn.call_tool("add_nums", {"a": 3, "b": 5})
         assert result == 8
+
+        # stdio 形态：axi.env 回落到进程环境变量
+        assert await conn.call_tool("read_var", {}) == "from-env"
     finally:
         await conn.close()
 
@@ -206,9 +215,26 @@ async def test_http_transport(serve_env):
         )
         await conn.connect()
         tools = await conn.list_tools()
-        assert sorted(t.name for t in tools) == ["add_nums", "greet"]
+        assert sorted(t.name for t in tools) == ["add_nums", "greet", "read_var"]
         result = await conn.call_tool("greet", {"name": "axi"})
         assert result == "hi axi"
+
+        # 不带 header 的客户端：axi.env 回落到 server 进程的环境变量
+        assert await conn.call_tool("read_var", {}) == "from-env"
+
+        # 带 Axi-* header 的客户端：请求级变量覆盖进程环境变量
+        conn_with_headers = MCPConnection(
+            MCPServerConfig(
+                server="axi-http-auth",
+                url=f"http://127.0.0.1:{port}/mcp",
+                headers={"Axi-A": "from-header"},
+            )
+        )
+        try:
+            await conn_with_headers.connect()
+            assert await conn_with_headers.call_tool("read_var", {}) == "from-header"
+        finally:
+            await conn_with_headers.close()
     finally:
         if conn is not None:
             await conn.close()

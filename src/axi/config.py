@@ -109,6 +109,7 @@ class MCPServerConfig(BaseModel):
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] | None = None
     url: str | None = None
+    headers: dict[str, str] | None = None
 
 
 class NativeToolEntry(BaseModel):

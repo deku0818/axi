@@ -4,9 +4,10 @@ import logging
 from typing import Any, Callable
 
 from axi.cli import get_executor, get_registry
+from axi.context import env
 from axi.providers.native import register_tool
 
-__all__ = ["tool"]
+__all__ = ["tool", "env"]
 
 # 包级 logger：各子模块通过 logging.getLogger(__name__) 自动继承
 _logger = logging.getLogger("axi")
