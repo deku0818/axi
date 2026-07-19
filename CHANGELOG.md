@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.10] - 2026-07-19
+
+### Changed
+- `axi mcp --transport http` 补齐可观测性：连接建立时打印监听地址，每次 `call_tool` 记录工具名，uvicorn access log 与 axi/mcp 的 INFO 日志一并输出到 stderr。stdio 模式不受影响（stdout 是协议通道，仍保持静默）
+
 ## [0.0.9] - 2026-07-07
 
 ### Fixed

@@ -180,6 +180,7 @@ def _build_flat_server(registry: Registry, executor: Executor) -> Server:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> Any:
+        logger.info("call_tool %s", name)
         full_name = name_map.get(name)
         if full_name is None:
             raise ValueError(
@@ -264,6 +265,7 @@ def _build_meta_server(registry: Registry, executor: Executor) -> Server:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> Any:
+        logger.info("call_tool %s", name)
         if name == "search":
             results = await asyncio.to_thread(
                 registry.search, arguments["query"], arguments.get("top_k", 5)
@@ -304,6 +306,22 @@ async def _run_stdio(server: Server) -> None:
         await server.run(read, write, server.create_initialization_options())
 
 
+def _setup_http_logging() -> None:
+    """HTTP 模式把 axi 与 mcp 的日志打到 stderr（INFO），让连接/请求可见。
+
+    只在 HTTP 模式调用：stdio 的 stdout 是协议通道不能污染，而未配置 handler 时
+    Python 的 lastResort 只在 WARNING 以上输出，故 stdio/cli 的 info 日志天然静默。
+    uvicorn 自身的 access log 由 Config(log_level="info") 负责，这里补齐 axi/mcp。
+    """
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S")
+    )
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+
 async def _run_http(server: Server, host: str, port: int) -> None:
     import uvicorn
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -315,7 +333,8 @@ async def _run_http(server: Server, host: str, port: int) -> None:
         routes=[Mount("/mcp", app=manager.handle_request)],
         lifespan=lambda app: manager.run(),
     )
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    logger.info("axi MCP server listening on http://%s:%d/mcp", host, port)
+    config = uvicorn.Config(app, host=host, port=port, log_level="info")
     await uvicorn.Server(config).serve()
 
 
@@ -345,6 +364,7 @@ def serve(
         server = _build_meta_server(registry, executor)
 
     if transport == "http":
+        _setup_http_logging()
         asyncio.run(_run_http(server, host, port))
     else:
         asyncio.run(_run_stdio(server))
