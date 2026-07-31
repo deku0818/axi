@@ -8,10 +8,12 @@ import threading
 from contextlib import AsyncExitStack
 from typing import Any, Self
 
-import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamable_http_client
+from mcp.client.streamable_http import (
+    create_mcp_http_client,
+    streamable_http_client,
+)
 from pydantic import Field, model_validator
 
 from axi.config import MCPServerConfig as MCPServerBaseConfig, app_config
@@ -21,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class MCPToolError(Exception):
-    """MCP server 返回的工具级错误（isError=true）。
+    """MCP server 返回的工具级错误（is_error=true）。
 
     区别于连接层异常：工具级错误不应触发重连重试。
     """
@@ -53,18 +55,10 @@ class MCPConnection:
         """建立连接并初始化 session。中途失败时 with 退出自动清理已打开的资源。"""
         async with AsyncExitStack() as stack:
             if self.config.url:
-                http_client = None
-                if self.config.headers:
-                    # 超时与 SDK 默认客户端（create_mcp_http_client）一致：
-                    # 读超时 300s 是 SSE 长调用的存活窗口，不能用整体 30s
-                    http_client = await stack.enter_async_context(
-                        httpx.AsyncClient(
-                            headers=self.config.headers,
-                            timeout=httpx.Timeout(30, read=300),
-                            follow_redirects=True,
-                        )
-                    )
-                read_stream, write_stream, _ = await stack.enter_async_context(
+                http_client = await stack.enter_async_context(
+                    create_mcp_http_client(headers=self.config.headers)
+                )
+                read_stream, write_stream = await stack.enter_async_context(
                     streamable_http_client(self.config.url, http_client=http_client)
                 )
             else:
@@ -98,16 +92,14 @@ class MCPConnection:
                     name=t.name,
                     server=self.config.server,
                     description=t.description or "",
-                    input_schema=t.inputSchema
-                    if isinstance(t.inputSchema, dict)
-                    else {},
+                    input_schema=t.input_schema,
                     source=ToolSource.MCP,
                 )
             )
         return tools
 
     async def call_tool(self, tool_name: str, params: dict[str, Any]) -> Any:
-        """调用工具。server 返回 isError 时抛 MCPToolError。"""
+        """调用工具。server 返回 is_error 时抛 MCPToolError。"""
         if not self.session:
             raise RuntimeError("Not connected")
 
@@ -120,7 +112,7 @@ class MCPConnection:
             else:
                 contents.append(str(block))
 
-        if result.isError:
+        if result.is_error:
             raise MCPToolError("\n".join(contents) or "Unknown tool error")
 
         if len(contents) == 1:
@@ -181,7 +173,7 @@ class MCPProvider:
             )
 
         async def _call() -> RunResult:
-            """工具级错误（isError）就地转 error 信封，不参与重连重试。"""
+            """工具级错误（is_error）就地转 error 信封，不参与重连重试。"""
             try:
                 return RunResult.success(await conn.call_tool(tool_name, params))
             except MCPToolError as e:

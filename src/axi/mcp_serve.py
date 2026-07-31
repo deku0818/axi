@@ -12,9 +12,11 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import mcp.types as types
+from mcp.server.context import ServerRequestContext
 from mcp.server.lowlevel import Server
 
 from axi.config import app_config
@@ -88,7 +90,7 @@ def build_registry(
 
 
 async def _execute(
-    server: Server,
+    ctx: ServerRequestContext,
     registry: Registry,
     executor: Executor,
     name: str,
@@ -109,7 +111,7 @@ async def _execute(
         return RunResult.fail(str(e))
 
     if meta.source == ToolSource.NATIVE:
-        request = server.request_context.request
+        request = ctx.request
         set_request_env(request.headers if request else None)
         return await asyncio.to_thread(executor.run, meta.full_name, params)
 
@@ -123,10 +125,49 @@ async def _execute(
     return RunResult.fail(resp.error or "Unknown error")
 
 
-def _text(data: Any) -> list[types.TextContent]:
+def _result(data: Any, is_error: bool = False) -> types.CallToolResult:
     if not isinstance(data, str):
         data = json.dumps(data, ensure_ascii=False, default=str)
-    return [types.TextContent(type="text", text=data)]
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=data)], is_error=is_error
+    )
+
+
+_Dispatch = Callable[
+    [ServerRequestContext, str, dict[str, Any]], Awaitable[types.CallToolResult]
+]
+
+
+def _build_server(
+    tools: list[types.Tool], dispatch: _Dispatch, instructions: str | None = None
+) -> Server:
+    """两种模式共用的 Server 组装：静态工具列表 + call_tool 统一守卫。
+
+    v2 不再把 handler 异常转 is_error 结果（会抛成对 agent 不可读的协议错误），
+    缺参/坏正则等在此统一捕获。
+    """
+    listing = types.ListToolsResult(tools=tools)
+
+    async def list_tools(
+        ctx: ServerRequestContext, params: types.PaginatedRequestParams | None
+    ) -> types.ListToolsResult:
+        return listing
+
+    async def call_tool(
+        ctx: ServerRequestContext, params: types.CallToolRequestParams
+    ) -> types.CallToolResult:
+        logger.info("call_tool %s", params.name)
+        try:
+            return await dispatch(ctx, params.name, params.arguments or {})
+        except Exception as e:
+            return _result(f"{type(e).__name__}: {e}", is_error=True)
+
+    return Server(
+        "axi",
+        instructions=instructions,
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+    )
 
 
 # ── flat 模式 ────────────────────────────────────────────────
@@ -160,7 +201,6 @@ def _tool_description(meta: ToolMeta) -> str:
 
 
 def _build_flat_server(registry: Registry, executor: Executor) -> Server:
-    server = Server("axi")
     name_map = flat_name_map(registry.list_all())
     # registry 在 serve 期间不可变，工具列表一次性预构建
     tools = []
@@ -170,28 +210,25 @@ def _build_flat_server(registry: Registry, executor: Executor) -> Server:
             types.Tool(
                 name=mcp_name,
                 description=_tool_description(meta),
-                inputSchema=meta.input_schema or {"type": "object"},
+                input_schema=meta.input_schema or {"type": "object"},
             )
         )
 
-    @server.list_tools()
-    async def list_tools() -> list[types.Tool]:
-        return tools
-
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any]) -> Any:
-        logger.info("call_tool %s", name)
+    async def dispatch(
+        ctx: ServerRequestContext, name: str, arguments: dict[str, Any]
+    ) -> types.CallToolResult:
         full_name = name_map.get(name)
         if full_name is None:
-            raise ValueError(
-                f"Unknown tool: {name}. Call tools/list to see the available tools."
+            return _result(
+                f"Unknown tool: {name}. Call tools/list to see the available tools.",
+                is_error=True,
             )
-        result = await _execute(server, registry, executor, full_name, arguments)
+        result = await _execute(ctx, registry, executor, full_name, arguments)
         if result.status == "error":
-            raise RuntimeError(result.error)
-        return _text(result.data)
+            return _result(result.error, is_error=True)
+        return _result(result.data)
 
-    return server
+    return _build_server(tools, dispatch)
 
 
 # ── meta 模式 ────────────────────────────────────────────────
@@ -201,7 +238,7 @@ _META_TOOLS = [
         name="search",
         description="Hybrid search (BM25 + embedding) over available tools. "
         "Use natural language describing the capability you need.",
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
@@ -214,7 +251,7 @@ _META_TOOLS = [
         name="grep",
         description="Regex search over tool names and descriptions. "
         "Use when you know a fragment of the tool or server name.",
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "pattern": {"type": "string"},
@@ -227,7 +264,7 @@ _META_TOOLS = [
         name="describe",
         description="Show a tool's full metadata including input schema. "
         "Accepts comma-separated names for batch lookup.",
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {"name": {"type": "string"}},
             "required": ["name"],
@@ -237,7 +274,7 @@ _META_TOOLS = [
         name="run",
         description="Execute a tool by name with a params object. "
         "Returns {status, data, error}.",
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "name": {"type": "string"},
@@ -257,43 +294,38 @@ def _describe_one(registry: Registry, name: str) -> dict[str, Any]:
 
 
 def _build_meta_server(registry: Registry, executor: Executor) -> Server:
-    server = Server("axi", instructions=_META_INSTRUCTIONS)
-
-    @server.list_tools()
-    async def list_tools() -> list[types.Tool]:
-        return _META_TOOLS
-
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any]) -> Any:
-        logger.info("call_tool %s", name)
+    async def dispatch(
+        ctx: ServerRequestContext, name: str, arguments: dict[str, Any]
+    ) -> types.CallToolResult:
         if name == "search":
             results = await asyncio.to_thread(
                 registry.search, arguments["query"], arguments.get("top_k", 5)
             )
-            return _text([r.model_dump(exclude_none=True) for r in results])
+            return _result([r.model_dump(exclude_none=True) for r in results])
         if name == "grep":
             results = await asyncio.to_thread(
                 registry.grep, arguments["pattern"], arguments.get("limit", 10)
             )
-            return _text([r.model_dump(exclude_none=True) for r in results])
+            return _result([r.model_dump(exclude_none=True) for r in results])
         if name == "describe":
             names = split_names(arguments["name"])
             out = [_describe_one(registry, n) for n in names]
-            return _text(out[0] if len(out) == 1 else out)
+            return _result(out[0] if len(out) == 1 else out)
         if name == "run":
             result = await _execute(
-                server,
+                ctx,
                 registry,
                 executor,
                 arguments["name"],
                 arguments.get("params") or {},
             )
-            return _text(result.model_dump(exclude_none=True))
-        raise ValueError(
-            f"Unknown tool: {name}. Available: search, grep, describe, run."
+            return _result(result.model_dump(exclude_none=True))
+        return _result(
+            f"Unknown tool: {name}. Available: search, grep, describe, run.",
+            is_error=True,
         )
 
-    return server
+    return _build_server(_META_TOOLS, dispatch, instructions=_META_INSTRUCTIONS)
 
 
 # ── transport 与入口 ─────────────────────────────────────────

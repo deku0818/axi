@@ -68,7 +68,7 @@ async def test_mcp_provider_connect_all(mock_config):
 
 @pytest.mark.asyncio
 async def test_mcp_tool_error_returns_error_envelope(mock_config):
-    """server 返回 isError 的结果必须落进 error 信封，不能伪装成 success。"""
+    """server 返回 is_error 的结果必须落进 error 信封，不能伪装成 success。"""
     provider = MCPProvider()
     try:
         await provider.connect_all([mock_config])

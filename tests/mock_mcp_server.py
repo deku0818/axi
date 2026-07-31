@@ -1,60 +1,75 @@
 """用于测试的 MCP mock server。"""
 
 from mcp.server import Server
+from mcp.server.context import ServerRequestContext
 from mcp.server.stdio import stdio_server
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+)
 
-server = Server("test-server")
-
-
-@server.list_tools()
-async def list_tools():
-    from mcp.types import Tool
-
-    return [
-        Tool(
-            name="echo",
-            description="Echo back the input message",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "message": {"type": "string", "description": "The message to echo"},
-                },
-                "required": ["message"],
+TOOLS = [
+    Tool(
+        name="echo",
+        description="Echo back the input message",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "The message to echo"},
             },
-        ),
-        Tool(
-            name="add",
-            description="Add two numbers",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "a": {"type": "number"},
-                    "b": {"type": "number"},
-                },
-                "required": ["a", "b"],
+            "required": ["message"],
+        },
+    ),
+    Tool(
+        name="add",
+        description="Add two numbers",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "a": {"type": "number"},
+                "b": {"type": "number"},
             },
-        ),
-        Tool(
-            name="boom",
-            description="Always fails with a tool-level error",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-    ]
+            "required": ["a", "b"],
+        },
+    ),
+    Tool(
+        name="boom",
+        description="Always fails with a tool-level error",
+        input_schema={"type": "object", "properties": {}},
+    ),
+]
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict):
-    from mcp.types import TextContent
+def _text(text: str, is_error: bool = False) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)], is_error=is_error
+    )
 
-    if name == "echo":
-        return [TextContent(type="text", text=arguments["message"])]
-    elif name == "add":
-        result = arguments["a"] + arguments["b"]
-        return [TextContent(type="text", text=str(result))]
-    elif name == "boom":
-        raise RuntimeError("kaboom")
-    else:
-        raise ValueError(f"Unknown tool: {name}")
+
+async def list_tools(
+    ctx: ServerRequestContext, params: PaginatedRequestParams | None
+) -> ListToolsResult:
+    return ListToolsResult(tools=TOOLS)
+
+
+async def call_tool(
+    ctx: ServerRequestContext, params: CallToolRequestParams
+) -> CallToolResult:
+    arguments = params.arguments or {}
+    if params.name == "echo":
+        return _text(arguments["message"])
+    if params.name == "add":
+        return _text(str(arguments["a"] + arguments["b"]))
+    if params.name == "boom":
+        return _text("kaboom", is_error=True)
+    return _text(f"Unknown tool: {params.name}", is_error=True)
+
+
+server = Server("test-server", on_list_tools=list_tools, on_call_tool=call_tool)
 
 
 async def main():

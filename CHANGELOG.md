@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.11] - 2026-07-31
+
+### Changed
+- mcp SDK 升级至 2.0（1.26 → 2.0.0）：客户端字段改 snake_case（`input_schema` / `is_error`），HTTP 客户端改用 SDK 的 `create_mcp_http_client`；服务端 handler 从装饰器注册迁移到构造函数 `on_*` 参数，flat / meta 两模式共用 `_build_server` 组装（统一静态工具列表与 call_tool 异常守卫——v2 不再把 handler 异常转 is_error 结果，改为就地捕获返回 agent 可读的错误）。对外行为不变：CLI 输出、`axi mcp` 的工具形态与错误信封与 0.0.10 一致，老协议 MCP server（2024-11-05 起所有版本）继续通过握手协商兼容，下游零改动
+
 ## [0.0.10] - 2026-07-19
 
 ### Changed
