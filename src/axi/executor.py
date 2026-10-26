@@ -1,16 +1,17 @@
-"""统一执行层：执行原生工具。MCP 工具通过 daemon 执行。"""
+"""统一执行入口：原生工具进程内执行，MCP 工具交给 daemon。"""
 
 import asyncio
 import inspect
 import logging
-import traceback
 from typing import Any
 
 from pydantic import ValidationError
 
+from axi.daemon.client import daemon_request
+from axi.daemon.protocol import DaemonRequest
 from axi.models import RunResult, ToolSource
 from axi.providers.native import get_native_function, validate_native_params
-from axi.registry import Registry
+from axi.registry import Registry, ToolNotFoundError, ToolResolveError
 
 logger = logging.getLogger(__name__)
 
@@ -24,25 +25,29 @@ def _format_validation_error(e: ValidationError) -> str:
 
 
 class Executor:
-    """原生工具执行器。"""
+    """按工具来源分发执行并返回统一结果。"""
 
     def __init__(self, registry: Registry) -> None:
         self._registry = registry
 
     def run(self, full_name: str, params: dict[str, Any]) -> RunResult:
-        """执行原生工具并返回统一结果。"""
-        meta = self._registry.get(full_name)
-        if not meta:
-            return RunResult.fail(f"Tool not found: {full_name}")
+        """解析名称；本地未找到的工具由 daemon 解析。"""
+        try:
+            meta = self._registry.resolve(full_name)
+        except ToolNotFoundError:
+            meta = None
+        except ToolResolveError as e:
+            return RunResult.fail(str(e))
 
-        if meta.source != ToolSource.NATIVE:
-            return RunResult.fail(
-                f"Non-native tool should be executed via daemon: {full_name}"
+        if meta is None or meta.source == ToolSource.MCP:
+            resp = daemon_request(
+                DaemonRequest(
+                    method="call_tool",
+                    tool_name=meta.full_name if meta else full_name,
+                    params=params,
+                )
             )
-
-        func = get_native_function(meta.full_name)
-        if not func:
-            return RunResult.fail(f"Native function not found: {meta.full_name}")
+            return RunResult(**resp.model_dump())
 
         try:
             params = validate_native_params(meta.full_name, params)
@@ -50,10 +55,10 @@ class Executor:
             return RunResult.fail(f"Invalid params: {_format_validation_error(e)}")
 
         try:
-            result = func(**params)
+            result = get_native_function(meta.full_name)(**params)
             if inspect.isawaitable(result):
                 result = asyncio.run(result)
             return RunResult.success(result)
         except Exception as e:
-            logger.debug("Tool execution error:\n%s", traceback.format_exc())
+            logger.debug("Tool execution error", exc_info=True)
             return RunResult.fail(f"{type(e).__name__}: {e}")

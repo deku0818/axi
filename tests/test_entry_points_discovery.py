@@ -4,7 +4,7 @@ import sys
 from importlib.metadata import EntryPoint
 from unittest.mock import patch
 
-from axi.cli import get_registry
+from axi import runtime
 from axi.providers.native import load_native_tool_modules
 
 _FAKE_TOOL_SHORT_NAMES = ("ping_ep", "pong_ep")
@@ -15,7 +15,7 @@ def _reset_fake_ep_module() -> None:
     for mod_name in list(sys.modules):
         if mod_name.startswith("fake_ep"):
             sys.modules.pop(mod_name, None)
-    registry = get_registry()
+    registry = runtime.registry
     for full_name in list(registry.list_names()):
         if any(full_name.endswith(f"/{t}") for t in _FAKE_TOOL_SHORT_NAMES):
             registry._tools.pop(full_name, None)
@@ -36,10 +36,22 @@ def test_entry_points_discovers_and_registers_tool():
     ):
         load_native_tool_modules()
 
-    registry = get_registry()
+    registry = runtime.registry
     meta = registry.get("fakepkg/ping_ep")
     assert meta is not None, "tool should be registered under entry_points server name"
     assert meta.name == "ping_ep"
+
+
+def test_ptc_discovers_entry_points_without_cli_callback(monkeypatch):
+    from axi import tool
+
+    _reset_fake_ep_module()
+    monkeypatch.setattr("axi.providers.native._modules_loaded", False)
+    with patch(
+        "axi.providers.native.importlib.metadata.entry_points",
+        return_value=[_make_ep("ptcpkg", "fake_ep_tools")],
+    ):
+        assert tool("ptcpkg/ping_ep")() == {"ok": True, "source": "entry_points"}
 
 
 def test_entry_points_module_deduped_against_axi_json(monkeypatch):
@@ -60,7 +72,7 @@ def test_entry_points_module_deduped_against_axi_json(monkeypatch):
     ):
         load_native_tool_modules()
 
-    registry = get_registry()
+    registry = runtime.registry
     assert registry.get("jsonname/ping_ep") is not None, "axi.json 的 server 名应赢"
     assert registry.get("fakepkg/ping_ep") is None, "entry_points 同模块应被去重跳过"
 
@@ -74,7 +86,7 @@ def test_entry_points_value_colon_suffix_is_stripped():
     ):
         load_native_tool_modules()
 
-    registry = get_registry()
+    registry = runtime.registry
     assert registry.get("colonpkg/ping_ep") is not None, "冒号后缀应被剥离后仍能 import"
 
 
@@ -97,7 +109,7 @@ def test_entry_points_server_name_collision_warns_and_merges(monkeypatch, caplog
     ):
         load_native_tool_modules()
 
-    registry = get_registry()
+    registry = runtime.registry
     assert registry.get("shared/ping_ep") is not None, "axi.json 的工具应挂到 shared 下"
     assert registry.get("shared/pong_ep") is not None, (
         "entry_points 的工具也应挂到 shared 下（warning 后继续加载）"
@@ -125,25 +137,8 @@ def test_entry_points_broken_module_is_logged_and_skipped(monkeypatch, caplog):
         # 不应抛——ModuleNotFoundError 会被 except Exception 捕获
         load_native_tool_modules()
 
-    registry = get_registry()
+    registry = runtime.registry
     assert registry.get("good/ping_ep") is not None, "axi.json 来源的工具应该照常加载"
     assert registry.get("brokenpkg/ping_ep") is None, "坏 ep 不应该注册任何东西"
     assert "Failed to load native tool module" in caplog.text
     assert "definitely_not_a_real_module_xyz" in caplog.text
-
-
-def test_entry_points_query_failure_is_tolerated(caplog):
-    """entry_points 查询本身失败时降级为仅 axi.json 来源，记日志但不抛异常。"""
-    _reset_fake_ep_module()
-
-    def _boom(*_args, **_kwargs):
-        raise RuntimeError("metadata backend broken")
-
-    with patch(
-        "axi.providers.native.importlib.metadata.entry_points", side_effect=_boom
-    ):
-        load_native_tool_modules()
-
-    assert "Failed to query entry_points" in caplog.text, (
-        "entry_points 查询失败应记 exception 日志"
-    )

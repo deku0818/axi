@@ -15,6 +15,7 @@ from axi.daemon.protocol import (
     SOCKET_DIR,
     SOCKET_PATH,
     PID_PATH,
+    STREAM_LIMIT,
     DaemonRequest,
     DaemonResponse,
 )
@@ -26,9 +27,8 @@ logger = logging.getLogger(__name__)
 _DAEMON_START_TIMEOUT = 60.0  # seconds
 _DAEMON_START_POLL_INTERVAL = 0.1  # seconds
 
-# StreamReader 缓冲区上限。默认 64KB 放不下完整工具列表（list/search 的响应是单行
-# JSON，工具多时轻松超过 64KB），会抛 asyncio.LimitOverrunError。调大到 8MB。
-_STREAM_LIMIT = 8 * 1024 * 1024
+# 等待 daemon 退出（关 MCP 连接、删 PID / socket）的上限
+DAEMON_STOP_TIMEOUT = 60.0  # seconds
 
 
 def read_live_pid() -> int | None:
@@ -47,6 +47,21 @@ def is_daemon_running() -> bool:
     return read_live_pid() is not None and os.path.exists(SOCKET_PATH)
 
 
+def wait_for_exit(pid: int, timeout: float = DAEMON_STOP_TIMEOUT) -> bool:
+    """等待目标 daemon 完成退出清理，超时返回 False。
+
+    PID 文件消失或被新实例替换时，目标已释放运行时文件。
+    固定目标 PID，避免并发 start 后转而等待新实例退出。
+    """
+    deadline = time.monotonic() + timeout
+    while read_live_pid() == pid:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_DAEMON_START_POLL_INTERVAL, remaining))
+    return True
+
+
 def _spawn_and_wait() -> bool:
     """拉起 daemon 子进程并轮询直到就绪。调用方需持有启动锁。"""
     with open(LOG_PATH, "a") as log_file:
@@ -58,17 +73,25 @@ def _spawn_and_wait() -> bool:
             env={**os.environ, "AXI_CONFIG": str(CONFIG_PATH)},
         )
 
+    return _wait_for_ready(proc)
+
+
+def _wait_for_ready(proc: subprocess.Popen | None = None) -> bool:
+    """等待新拉起或已在初始化的 daemon，不重复启动。"""
     deadline = time.monotonic() + _DAEMON_START_TIMEOUT
     while time.monotonic() < deadline:
         if is_daemon_running():
             return True
         # 子进程已退出：socket 不会再出现，别把超时时间白等完
-        if proc.poll() is not None:
+        if proc is not None and proc.poll() is not None:
             logger.error(
                 "Daemon exited with code %s during startup. Check log: %s",
                 proc.returncode,
                 LOG_PATH,
             )
+            return False
+        if proc is None and read_live_pid() is None:
+            logger.error("Daemon exited during startup. Check log: %s", LOG_PATH)
             return False
         time.sleep(_DAEMON_START_POLL_INTERVAL)
     logger.error(
@@ -96,6 +119,8 @@ def ensure_daemon() -> bool:
         # 锁内复查：可能刚才另一个进程已经把 daemon 拉起来了
         if is_daemon_running():
             return True
+        if read_live_pid() is not None:
+            return _wait_for_ready()
         return _spawn_and_wait()
 
 
@@ -114,7 +139,7 @@ def daemon_request(req: DaemonRequest) -> DaemonResponse:
 async def _send(req: DaemonRequest) -> DaemonResponse:
     try:
         reader, writer = await asyncio.open_unix_connection(
-            SOCKET_PATH, limit=_STREAM_LIMIT
+            SOCKET_PATH, limit=STREAM_LIMIT
         )
     except OSError as e:
         return DaemonResponse.fail(

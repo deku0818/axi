@@ -397,7 +397,7 @@ result = query(region="cn")
 
 ### 搜索可插拔
 
-搜索默认使用 BM25 关键词搜索（bm25s + jieba 分词，支持中英文），可选启用 Embedding 语义搜索（Jina/OpenAI），两者通过 RRF（Reciprocal Rank Fusion）混合排序。正则匹配也仍然可用。搜索结果包含归一化到 0-1 的相关性分数。
+搜索默认使用 BM25 关键词搜索（bm25s + jieba 分词，支持中英文），可选启用 Embedding 语义搜索（Jina/OpenAI），两者通过 RRF（Reciprocal Rank Fusion）混合排序。正则匹配也仍然可用。搜索结果返回按相关性排序的工具摘要，不包含分数。
 
 ```bash
 # BM25 关键词搜索（默认）

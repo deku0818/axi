@@ -1,8 +1,12 @@
 """用于测试的 MCP mock server。"""
 
+import os
+from pathlib import Path
+
 from mcp.server import Server
 from mcp.server.context import ServerRequestContext
 from mcp.server.stdio import stdio_server
+from mcp.shared.exceptions import MCPError
 from mcp.types import (
     CallToolRequestParams,
     CallToolResult,
@@ -53,6 +57,12 @@ def _text(text: str, is_error: bool = False) -> CallToolResult:
 async def list_tools(
     ctx: ServerRequestContext, params: PaginatedRequestParams | None
 ) -> ListToolsResult:
+    if os.environ.get("AXI_TEST_LIST_ERROR"):
+        raise MCPError(code=-32603, message="test tools/list failure")
+    if os.environ.get("AXI_TEST_PAGINATED"):
+        if params is None or params.cursor is None:
+            return ListToolsResult(tools=TOOLS[:1], next_cursor="rest")
+        return ListToolsResult(tools=TOOLS[1:])
     return ListToolsResult(tools=TOOLS)
 
 
@@ -73,6 +83,8 @@ server = Server("test-server", on_list_tools=list_tools, on_call_tool=call_tool)
 
 
 async def main():
+    if pid_path := os.environ.get("AXI_TEST_PID_PATH"):
+        Path(pid_path).write_text(str(os.getpid()))
     async with stdio_server() as (read, write):
         await server.run(read, write, server.create_initialization_options())
 

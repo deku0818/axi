@@ -263,3 +263,93 @@ class TestDaemonStartupWindow:
         err = capsys.readouterr().err
         assert "still initializing" in err
         assert "Failed" not in err
+
+
+class TestDaemonStopWait:
+    """stop 要等目标 daemon 清理完成，随后 start 才能启动新实例。"""
+
+    def test_wait_for_exit_returns_true_when_pid_disappears(self, monkeypatch):
+        from axi.daemon.client import wait_for_exit
+
+        pids = iter([1234, 1234, None])
+        monkeypatch.setattr("axi.daemon.client.read_live_pid", lambda: next(pids))
+        assert wait_for_exit(1234, timeout=1.0) is True
+
+    def test_wait_for_exit_does_not_follow_replacement(self, monkeypatch):
+        from axi.daemon.client import wait_for_exit
+
+        pids = iter([1234, 5678])
+        monkeypatch.setattr("axi.daemon.client.read_live_pid", lambda: next(pids))
+        assert wait_for_exit(1234, timeout=1.0) is True
+
+    def test_wait_for_exit_times_out(self, monkeypatch):
+        import time
+
+        from axi.daemon.client import wait_for_exit
+
+        monkeypatch.setattr("axi.daemon.client.read_live_pid", lambda: 1234)
+        started = time.monotonic()
+        assert wait_for_exit(1234, timeout=0.2) is False
+        assert time.monotonic() - started >= 0.2
+
+    def test_stop_waits_before_reporting(self, monkeypatch, capsys):
+        from axi.cli import daemon_stop
+        from axi.daemon.protocol import DaemonResponse
+
+        waited = []
+        monkeypatch.setattr("axi.cli.read_live_pid", lambda: 1234)
+        monkeypatch.setattr("axi.cli.is_daemon_running", lambda: True)
+
+        def shutdown(req):
+            # 响应返回前，新 daemon 已替换 PID 文件。
+            monkeypatch.setattr("axi.cli.read_live_pid", lambda: 5678)
+            return DaemonResponse.success(None)
+
+        monkeypatch.setattr("axi.cli.send_request", shutdown)
+        monkeypatch.setattr(
+            "axi.cli.wait_for_exit",
+            lambda pid: waited.append(pid) or True,
+        )
+
+        daemon_stop()
+
+        assert waited == [1234]
+        assert "Daemon stopped." in capsys.readouterr().out
+
+    def test_stop_starting_daemon_uses_original_pid(self, monkeypatch, capsys):
+        import signal
+
+        from axi.cli import daemon_stop
+
+        killed = []
+        waited = []
+        monkeypatch.setattr("axi.cli.read_live_pid", lambda: 1234)
+        monkeypatch.setattr("axi.cli.is_daemon_running", lambda: False)
+        monkeypatch.setattr("axi.cli.os.kill", lambda *args: killed.append(args))
+        monkeypatch.setattr(
+            "axi.cli.wait_for_exit",
+            lambda pid: waited.append(pid) or True,
+        )
+        daemon_stop()
+        assert killed == [(1234, signal.SIGTERM)]
+        assert waited == [1234]
+        assert "Daemon stopped." in capsys.readouterr().out
+
+    def test_stop_reports_failure_when_process_outlives_timeout(
+        self, monkeypatch, capsys
+    ):
+        import typer
+
+        from axi.cli import daemon_stop
+        from axi.daemon.protocol import DaemonResponse
+
+        monkeypatch.setattr("axi.cli.read_live_pid", lambda: 1234)
+        monkeypatch.setattr("axi.cli.is_daemon_running", lambda: True)
+        monkeypatch.setattr(
+            "axi.cli.send_request", lambda req: DaemonResponse.success(None)
+        )
+        monkeypatch.setattr("axi.cli.wait_for_exit", lambda pid: False)
+
+        with pytest.raises(typer.Exit):
+            daemon_stop()
+        assert "did not exit" in capsys.readouterr().err

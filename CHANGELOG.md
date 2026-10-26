@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.13] - 2026-10-26
+
+### Fixed
+- `axi daemon stop` 等目标 daemon 完成退出清理后再报告成功，避免紧接着的 start 撞上仍在收尾的实例；固定等待本次停止的 PID，不会转而等待并发启动的新实例
+- 停止等待上限从 5 秒延长至 60 秒，为多个 MCP 依次关闭留出时间；超时返回非零退出码并指向日志
+- daemon 正常关闭的取消由生命周期入口处理，退出不再产生 traceback；不在进程入口吞掉未知取消异常
+- 自动启动复用仍在初始化的 daemon，避免超时后再次调用时重复拉起进程、覆盖 PID/socket
+- 每条 MCP 连接由固定后台任务持有和清理，修复请求任务重连时的 AnyIO 跨任务错误；并发重连共用新 session，关闭期间不再重连，获取工具失败的连接及时回收且不影响其他 server
+- MCP 工具发现跟随 `next_cursor` 读取所有分页；daemon 请求与响应统一使用 8 MiB 读取上限，支持超过 64 KiB 的工具参数
+- `@tool(name="...")` 可单独指定名称，description 缺省用 docstring；Python PTC 首次调用自动加载 nativeTools 和 entry_points，nativeTools 相对文件路径以配置文件目录为基准
+- Embedding SDK 网络/限流等异常回退 BM25；缓存按 provider、model、baseUrl 隔离，切换向量空间时重新生成 embedding，不复用旧模型缓存
+
+### Changed
+- CLI、Python PTC 和 MCP 导出统一使用 `Executor.run` 分发执行；进程内 Registry / Executor 移入 `runtime.py`，Python API 不再依赖 CLI 模块
+- 原生函数和参数模型合并存储；删除未使用的同步 MCP 事件循环、重复 schema 查询和不输出的搜索分数归一化
+- 精简配置加载和退出处理，删除虚构内部状态、重复实现细节和标准库行为的测试，保留业务与真实故障回归测试
+
 ## [0.0.12] - 2026-10-26
 
 ### Fixed

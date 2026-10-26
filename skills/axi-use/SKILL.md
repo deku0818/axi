@@ -103,6 +103,8 @@ search = tool("jina/jina_search")   # 返回可调用句柄，参数跟 `axi run
 results = search(query="python best practices", count=3)
 ```
 
+首次调用自动加载配置中的 `nativeTools` 和 `axi.native_tools` entry_points。原生工具在当前进程执行；MCP 工具经 daemon 执行。
+
 ## 命令速查
 
 | 命令 | 用途 | 典型例子 |

@@ -103,6 +103,8 @@ def query_orders(region: str, limit: int = 10) -> dict:
 ```
 
 装饰器自动从函数签名提取参数 schema。注册后同时获得 CLI 调用和 PTC 调用能力。
+可以只写 `@tool(name="query_orders")`，描述默认取函数 docstring。
+`nativeTools` 中的相对 `.py` 路径以 `AXI_CONFIG` 指向的配置文件目录为基准。
 
 ## PTC（Programmatic Tool Calling）
 
@@ -114,6 +116,9 @@ from axi import tool
 search = tool("jina/jina_search")
 results = search(query="python async", count=5)
 ```
+
+首次 PTC 调用会自动发现配置中的 `nativeTools` 和已安装包的 `axi.native_tools`
+entry_points；原生工具在进程内执行，MCP 工具通过 daemon 执行。
 
 ## 导出为 MCP server
 
@@ -150,7 +155,7 @@ MCP 客户端配置示例（stdio 由客户端拉起，用 `AXI_CONFIG` 锚定�
 
 axi 提供两种搜索方式：
 
-- **`axi search`** — 混合搜索，默认 BM25 关键词搜索（bm25s + jieba 分词，支持中英文）。配置 `search.embedding` 后启用 BM25 + Embedding 混合搜索（RRF 融合排序，分数归一化 0-1）
+- **`axi search`** — 混合搜索，默认 BM25 关键词搜索（bm25s + jieba 分词，支持中英文）。配置 `search.embedding` 后启用 BM25 + Embedding 混合搜索（RRF 融合排序，结果按相关性排序）
 - **`axi grep`** — 正则表达式搜索，按工具名和描述匹配
 
 结果按相关性排序返回，顺序本身即信号（不含分数：native 与 MCP 来自两套索引、分数不可比）。
@@ -212,6 +217,10 @@ daemon 启动时先写 PID、再连 MCP server，最后才创建 socket。连接
 官方 MCP 冷启动可能要几十秒）status 返回 `{"status": "starting", "pid": 12345}`，
 不是 `stopped`；`axi daemon start` 也会等到就绪或超时，超时但进程仍存活时提示
 "Daemon is still initializing" 而不是启动失败。
+再次调用会继续等待现有启动进程，避免重复拉起 daemon。
+
+`axi daemon stop` 等目标 daemon 完成退出清理后再报告成功；并发启动的新实例不会
+延长这次等待。多个 MCP 会依次关闭，最多等待 60 秒；超时返回非零退出码并给出日志路径。
 
 ### 文件位置
 

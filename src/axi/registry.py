@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from typing import TYPE_CHECKING
 
 from axi.config import SearchConfig
 from axi.models import SearchResult, ToolMeta
-from axi.search.cache import EmbeddingCache
+from axi.search.cache import EmbeddingCache, content_hash
 from axi.search.embedding import EmbeddingProvider, create_embedding_provider
 
 if TYPE_CHECKING:
@@ -61,9 +62,13 @@ class Registry:
     def from_search_config(cls, cfg: SearchConfig) -> Registry:
         """按 axi.json 的 search 配置构建带混合搜索的 Registry。"""
         provider = create_embedding_provider(cfg.embedding)
+        # 模型和端点决定向量空间；API key 不参与缓存标识，也不落盘。
+        namespace = content_hash(
+            json.dumps(cfg.embedding.model_dump(exclude={"api_key"}), sort_keys=True)
+        )
         return cls(
             embedding_provider=provider,
-            embedding_cache=EmbeddingCache() if provider else None,
+            embedding_cache=EmbeddingCache(namespace=namespace) if provider else None,
             weight_bm25=cfg.weights.bm25,
             weight_embedding=cfg.weights.embedding,
         )
@@ -87,14 +92,9 @@ class Registry:
           - 无匹配 → 抛 ToolResolveError
         """
         if "/" in name:
-            meta = self._tools.get(name)
-            if meta is None:
-                raise ToolNotFoundError(
-                    f"Tool not found: {name}. Use search to discover available tools."
-                )
-            return meta
-
-        matches = [t for t in self._tools.values() if t.name == name]
+            matches = [self._tools[name]] if name in self._tools else []
+        else:
+            matches = [t for t in self._tools.values() if t.name == name]
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
@@ -120,9 +120,7 @@ class Registry:
 
     def set_server(self, full_name: str, server: str) -> None:
         """更新工具的 server 名，同时更新注册 key。"""
-        meta = self._tools.pop(full_name, None)
-        if meta is None:
-            return
+        meta = self._tools.pop(full_name)
         updated = meta.model_copy(update={"server": server})
         self._tools[updated.full_name] = updated
         self._version += 1

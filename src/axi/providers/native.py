@@ -6,19 +6,21 @@ import importlib.metadata
 import importlib.util
 import inspect
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Callable, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, create_model
 
-from axi.config import NativeToolEntry, app_config
+from axi.config import CONFIG_PATH, NativeToolEntry, app_config
 from axi.models import ToolMeta, ToolSource
 
 logger = logging.getLogger(__name__)
 
-# 全局注册表，存储原生工具的函数引用和参数模型
-_native_functions: dict[str, Callable] = {}
-_native_models: dict[str, type[BaseModel]] = {}
+# 函数和参数模型共享一个键，归入 server 时一起迁移。
+_native_tools: dict[str, tuple[Callable, type[BaseModel]]] = {}
+_modules_loaded = False
+_load_lock = threading.RLock()
 
 
 # ── 工具注册（@tool 装饰器的执行层）────────────────────────────
@@ -85,14 +87,13 @@ def register_tool(
         source=ToolSource.NATIVE,
     )
 
-    _native_functions[tool_name] = func
-    _native_models[tool_name] = model
+    _native_tools[tool_name] = (func, model)
     return meta
 
 
-def get_native_function(name: str) -> Callable | None:
+def get_native_function(name: str) -> Callable:
     """获取已注册的原生函数。"""
-    return _native_functions.get(name)
+    return _native_tools[name][0]
 
 
 def validate_native_params(name: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -101,15 +102,8 @@ def validate_native_params(name: str, params: dict[str, Any]) -> dict[str, Any]:
     校验失败抛 pydantic.ValidationError。转换让 CLI 传入的字符串
     变成目标类型（"3" → 3），嵌套 dict 变成对应的 BaseModel 实例。
     """
-    validated = _native_models[name].model_validate(params)
+    validated = _native_tools[name][1].model_validate(params)
     return {k: getattr(validated, k) for k in validated.model_fields_set}
-
-
-def _rekey_native_tool(old_name: str, new_name: str) -> None:
-    """工具归入 server 后同步更新函数/模型注册键，与 registry 的 full_name 保持一致。"""
-    if old_name in _native_functions:
-        _native_functions[new_name] = _native_functions.pop(old_name)
-        _native_models[new_name] = _native_models.pop(old_name)
 
 
 # ── 模块发现与加载 ─────────────────────────────────────────────
@@ -119,7 +113,10 @@ NATIVE_TOOLS_ENTRY_POINT_GROUP = "axi.native_tools"
 
 def _import_from_file(file_path: str) -> None:
     """通过文件路径 import 模块，触发 @tool 注册。"""
-    path = Path(file_path).resolve()
+    path = Path(file_path).expanduser()
+    if not path.is_absolute():
+        path = CONFIG_PATH.parent / path
+    path = path.resolve()
     if not path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
     module_name = path.stem
@@ -146,15 +143,7 @@ def _load_native_entry(
     loaded: dict[str, str],
     source: str,
 ) -> None:
-    """加载单个原生工具模块并把新增工具归到 server_name 下。
-
-    ``loaded`` 以 "模块路径 → server 名" 映射**仅记录成功加载**的模块：
-    - 模块路径重复 → 跳过（axi.json 与 entry_points 声明同一个模块是预期情况）
-    - 导入抛异常 → logger.exception 后 return，不占坑也不让一个坏包搞崩 CLI
-    - 加载成功但 server 名被别的模块占了 → logger.warning，继续挂到该 server 下
-
-    失败的模块不写入 ``loaded`` 可以避免对后续合法包误报 collision。
-    """
+    """加载并归组；重复模块跳过，单个模块导入失败不影响其他模块。"""
     if module in loaded:
         return
     try:
@@ -182,7 +171,7 @@ def _load_native_entry(
     loaded[module] = server_name
     for name in new_names:
         registry.set_server(name, server_name)
-        _rekey_native_tool(name, f"{server_name}/{name}")
+        _native_tools[f"{server_name}/{name}"] = _native_tools.pop(name)
     # 记录来源，便于审计：entry_points 自动发现意味着任何已安装的包都可能注入工具
     logger.info(
         "Loaded %d native tool(s) from '%s' (%s) under server '%s': %s",
@@ -194,6 +183,13 @@ def _load_native_entry(
     )
 
 
+def ensure_native_tool_modules() -> None:
+    """Python PTC 首次使用时加载；CLI 已加载时直接复用。"""
+    with _load_lock:
+        if not _modules_loaded:
+            load_native_tool_modules()
+
+
 def load_native_tool_modules() -> None:
     """从 axi.json 的 nativeTools 与 Python entry_points 加载原生工具模块。
 
@@ -202,9 +198,11 @@ def load_native_tool_modules() -> None:
     - 因此重复声明时 axi.json 的 server 名赢
     - 不同模块声明同一个 server 名时仅 log warning，两边工具都会注册到该 server
     """
-    from axi.cli import get_registry
+    from axi.runtime import registry
 
-    registry = get_registry()
+    global _modules_loaded
+    # 导入模块里的工具声明可能再次使用 PTC，先标记以免递归加载。
+    _modules_loaded = True
     loaded: dict[str, str] = {}
 
     # 来源 1：axi.json 的 nativeTools（显式配置，优先级更高）
@@ -220,13 +218,7 @@ def load_native_tool_modules() -> None:
     # 来源 2：Python entry_points group="axi.native_tools"
     # 任何 pip 安装的包在 pyproject.toml 里声明就会被自动发现，
     # 无需在 axi.json 里重复登记。
-    try:
-        eps = importlib.metadata.entry_points(group=NATIVE_TOOLS_ENTRY_POINT_GROUP)
-    except Exception:
-        logger.exception(
-            "Failed to query entry_points for %s", NATIVE_TOOLS_ENTRY_POINT_GROUP
-        )
-        eps = []
+    eps = importlib.metadata.entry_points(group=NATIVE_TOOLS_ENTRY_POINT_GROUP)
     for ep in eps:
         module_path = ep.value.split(":", 1)[0].strip()
         _load_native_entry(

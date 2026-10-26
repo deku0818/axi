@@ -4,8 +4,7 @@ import asyncio
 import json
 import logging
 import os
-import threading
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from typing import Any, Self
 
 from mcp import ClientSession, StdioServerParameters
@@ -14,6 +13,7 @@ from mcp.client.streamable_http import (
     create_mcp_http_client,
     streamable_http_client,
 )
+from mcp.types import PaginatedRequestParams
 from pydantic import Field, model_validator
 
 from axi.config import MCPServerConfig as MCPServerBaseConfig, app_config
@@ -49,53 +49,82 @@ class MCPConnection:
     def __init__(self, config: MCPServerConfig):
         self.config = config
         self.session: ClientSession | None = None
-        self._exit_stack: AsyncExitStack | None = None
+        self._task: asyncio.Task[None] | None = None
+        self.reconnect_lock = asyncio.Lock()
 
     async def connect(self) -> None:
-        """建立连接并初始化 session。中途失败时 with 退出自动清理已打开的资源。"""
-        async with AsyncExitStack() as stack:
-            if self.config.url:
-                http_client = await stack.enter_async_context(
-                    create_mcp_http_client(headers=self.config.headers)
+        """由固定任务持有连接上下文；请求任务只使用 session。"""
+        ready = asyncio.get_running_loop().create_future()
+        self._task = asyncio.create_task(self._run_session(ready))
+        try:
+            await ready
+        except BaseException:
+            await self.close()
+            raise
+
+    async def _run_session(self, ready: asyncio.Future[None]) -> None:
+        try:
+            async with AsyncExitStack() as stack:
+                if self.config.url:
+                    http_client = await stack.enter_async_context(
+                        create_mcp_http_client(headers=self.config.headers)
+                    )
+                    read_stream, write_stream = await stack.enter_async_context(
+                        streamable_http_client(self.config.url, http_client=http_client)
+                    )
+                else:
+                    server_params = StdioServerParameters(
+                        command=self.config.command,
+                        args=self.config.args,
+                        env=self.config.env,
+                    )
+                    devnull = stack.enter_context(open(os.devnull, "w"))
+                    read_stream, write_stream = await stack.enter_async_context(
+                        stdio_client(server_params, errlog=devnull)
+                    )
+                session = await stack.enter_async_context(
+                    ClientSession(read_stream, write_stream)
                 )
-                read_stream, write_stream = await stack.enter_async_context(
-                    streamable_http_client(self.config.url, http_client=http_client)
+                await session.initialize()
+                self.session = session
+                ready.set_result(None)
+                await asyncio.Event().wait()
+        except BaseException as e:
+            if not ready.done():
+                ready.set_exception(e)
+            elif not isinstance(e, asyncio.CancelledError):
+                logger.exception(
+                    "MCP session '%s' closed unexpectedly", self.config.server
                 )
-            else:
-                server_params = StdioServerParameters(
-                    command=self.config.command,
-                    args=self.config.args,
-                    env=self.config.env,
-                )
-                devnull = stack.enter_context(open(os.devnull, "w"))
-                read_stream, write_stream = await stack.enter_async_context(
-                    stdio_client(server_params, errlog=devnull)
-                )
-            session = await stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
-            )
-            await session.initialize()
-            # 全部成功才接管资源所有权；此前任何一步抛出都由 with 清理
-            self._exit_stack = stack.pop_all()
-            self.session = session
+        finally:
+            self.session = None
 
     async def list_tools(self) -> list[ToolMeta]:
         """获取该 server 的所有工具。"""
         if not self.session:
             raise RuntimeError("Not connected")
 
-        response = await self.session.list_tools()
         tools = []
-        for t in response.tools:
-            tools.append(
-                ToolMeta(
-                    name=t.name,
-                    server=self.config.server,
-                    description=t.description or "",
-                    input_schema=t.input_schema,
-                    source=ToolSource.MCP,
-                )
+        cursor = None
+        while True:
+            response = await self.session.list_tools(
+                params=PaginatedRequestParams(cursor=cursor)
+                if cursor is not None
+                else None
             )
+            for t in response.tools:
+                tools.append(
+                    ToolMeta(
+                        name=t.name,
+                        server=self.config.server,
+                        description=t.description or "",
+                        input_schema=t.input_schema,
+                        source=ToolSource.MCP,
+                    )
+                )
+            cursor = response.next_cursor
+            if cursor is None:
+                break
         return tools
 
     async def call_tool(self, tool_name: str, params: dict[str, Any]) -> Any:
@@ -124,11 +153,15 @@ class MCPConnection:
         return contents
 
     async def close(self) -> None:
-        """关闭连接。"""
-        if self._exit_stack:
-            await self._exit_stack.aclose()
-            self._exit_stack = None
-            self.session = None
+        """通知持有者退出，等待它在原任务中关闭全部上下文。"""
+        task = self._task
+        if task:
+            if not task.cancelling():
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            if self._task is task:
+                self._task = None
 
 
 class MCPProvider:
@@ -136,6 +169,7 @@ class MCPProvider:
 
     def __init__(self) -> None:
         self._connections: dict[str, MCPConnection] = {}
+        self._closing = False
 
     def load_config(self) -> list[MCPServerConfig]:
         """从全局配置中读取 mcpServers。"""
@@ -146,6 +180,7 @@ class MCPProvider:
 
     async def connect_all(self, configs: list[MCPServerConfig]) -> list[ToolMeta]:
         """连接所有 MCP server，返回所有工具元数据。"""
+        self._closing = False
         all_tools: list[ToolMeta] = []
 
         for config in configs:
@@ -160,6 +195,7 @@ class MCPProvider:
                 await conn.close()
                 raise
             except Exception:
+                await conn.close()
                 # 连接失败不阻塞其他 server
                 logger.exception("Failed to connect to MCP server '%s'", config.server)
 
@@ -169,6 +205,8 @@ class MCPProvider:
         self, server: str, tool_name: str, params: dict[str, Any]
     ) -> RunResult:
         """路由到对应 MCP server 执行工具。失败时尝试重连一次。"""
+        if self._closing:
+            return RunResult.fail("MCP provider is shutting down.")
         conn = self._connections.get(server)
         if not conn:
             return RunResult.fail(
@@ -183,9 +221,12 @@ class MCPProvider:
             except MCPToolError as e:
                 return RunResult.fail(str(e))
 
+        previous_session = conn.session
         try:
             return await _call()
         except Exception as e:
+            if self._closing:
+                return RunResult.fail("MCP provider is shutting down.")
             logger.warning(
                 "Tool call '%s/%s' failed, attempting reconnect: %s",
                 server,
@@ -193,8 +234,12 @@ class MCPProvider:
                 e,
             )
             try:
-                await conn.close()
-                await conn.connect()
+                async with conn.reconnect_lock:
+                    if self._closing:
+                        return RunResult.fail("MCP provider is shutting down.")
+                    if conn.session is None or conn.session is previous_session:
+                        await conn.close()
+                        await conn.connect()
                 result = await _call()
                 logger.info("Reconnect to '%s' succeeded", server)
                 return result
@@ -206,50 +251,8 @@ class MCPProvider:
 
     async def close_all(self) -> None:
         """关闭所有连接。"""
-        # 连接的 AnyIO 上下文嵌套在同一任务中，必须按建立顺序的逆序退出。
-        for name, conn in reversed(self._connections.items()):
-            try:
+        self._closing = True
+        for conn in self._connections.values():
+            async with conn.reconnect_lock:
                 await conn.close()
-            except Exception as e:
-                logger.warning("Error closing MCP connection '%s': %s", name, e)
         self._connections.clear()
-
-
-_loop: asyncio.AbstractEventLoop | None = None
-_thread: threading.Thread | None = None
-_loop_lock = threading.Lock()
-
-
-def _get_loop() -> asyncio.AbstractEventLoop:
-    """获取或创建一个持久的事件循环（在后台线程运行）。"""
-    global _loop, _thread
-    with _loop_lock:
-        if _loop is None or _loop.is_closed():
-            _loop = asyncio.new_event_loop()
-
-            def _run() -> None:
-                asyncio.set_event_loop(_loop)
-                _loop.run_forever()
-
-            _thread = threading.Thread(target=_run, daemon=True)
-            _thread.start()
-    return _loop
-
-
-def run_async(coro: Any) -> Any:
-    """在持久事件循环上运行协程。"""
-
-    loop = _get_loop()
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result()
-
-
-def load_mcp_tools_sync() -> tuple[MCPProvider, list[ToolMeta]]:
-    """同步包装：加载配置并连接所有 MCP server。"""
-    provider = MCPProvider()
-    configs = provider.load_config()
-    if not configs:
-        return provider, []
-
-    tools = run_async(provider.connect_all(configs))
-    return provider, tools

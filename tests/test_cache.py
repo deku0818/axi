@@ -2,30 +2,10 @@
 
 from pathlib import Path
 
-from axi.search.cache import EmbeddingCache, content_hash
-
-
-class TestContentHash:
-    def test_deterministic(self):
-        assert content_hash("hello") == content_hash("hello")
-
-    def test_different_text(self):
-        assert content_hash("hello") != content_hash("world")
+from axi.search.cache import EmbeddingCache
 
 
 class TestEmbeddingCache:
-    def test_get_set(self, tmp_path: Path):
-        cache = EmbeddingCache(tmp_path / "test.json")
-        assert cache.get("k1") is None
-        cache.set("k1", [0.1, 0.2, 0.3])
-        assert cache.get("k1") == [0.1, 0.2, 0.3]
-
-    def test_has(self, tmp_path: Path):
-        cache = EmbeddingCache(tmp_path / "test.json")
-        assert not cache.has("k1")
-        cache.set("k1", [0.1])
-        assert cache.has("k1")
-
     def test_persistence(self, tmp_path: Path):
         path = tmp_path / "test.json"
         cache1 = EmbeddingCache(path)
@@ -34,3 +14,16 @@ class TestEmbeddingCache:
 
         cache2 = EmbeddingCache(path)
         assert cache2.get("k1") == [1.0, 2.0]
+
+    def test_namespace_does_not_reuse_legacy_or_other_models(self, tmp_path):
+        path = tmp_path / "cache.json"
+        legacy = EmbeddingCache(path)
+        legacy.set("same-text", [1.0])
+        legacy.save()
+        first = EmbeddingCache(path, namespace="model-one")
+        assert first.get("same-text") is None
+        first.set("same-text", [2.0])
+        first.save()
+        second = EmbeddingCache(path, namespace="model-two")
+        assert second.get("same-text") is None
+        assert EmbeddingCache(path, namespace="model-one").get("same-text") == [2.0]

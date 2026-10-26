@@ -9,21 +9,22 @@ from enum import Enum
 import typer
 from pydantic import BaseModel
 
+from axi import runtime
 from axi.config import CONFIG_PATH, app_config
 from axi.daemon.client import (
+    DAEMON_STOP_TIMEOUT,
     LOG_PATH,
     daemon_request,
     ensure_daemon,
     is_daemon_running,
     read_live_pid,
     send_request,
+    wait_for_exit,
 )
 from axi.daemon.protocol import DaemonRequest
-from axi.executor import Executor
 from axi.models import RunResult, SearchResult, allowed_types
 from axi.registry import (
     AmbiguousToolError,
-    Registry,
     ToolNotFoundError,
     split_names,
 )
@@ -46,10 +47,6 @@ app = typer.Typer(
 daemon_app = typer.Typer(help="管理 axi daemon")
 app.add_typer(daemon_app, name="daemon")
 
-# 全局实例（原生工具用）
-_registry = Registry()
-_executor = Executor(_registry)
-
 
 @app.callback(invoke_without_command=True)
 def main_callback(ctx: typer.Context) -> None:
@@ -59,14 +56,6 @@ def main_callback(ctx: typer.Context) -> None:
     load_native_tool_modules()
     if ctx.invoked_subcommand is None:
         raise typer.Exit()
-
-
-def get_registry() -> Registry:
-    return _registry
-
-
-def get_executor() -> Executor:
-    return _executor
 
 
 def _output_json(data: object) -> None:
@@ -113,23 +102,23 @@ def daemon_start() -> None:
 @daemon_app.command("stop")
 def daemon_stop() -> None:
     """停止 daemon。"""
-    if not is_daemon_running():
-        pid = read_live_pid()
-        if pid is None:
-            typer.echo("Daemon is not running.")
-            return
-        # 启动中（PID 在、socket 未建）：直接终止，不用等它连完 MCP server
-        os.kill(pid, signal.SIGTERM)
-        typer.echo("Daemon stopped.")
+    pid = read_live_pid()
+    if pid is None:
+        typer.echo("Daemon is not running.")
         return
-
-    try:
+    if is_daemon_running():
         resp = send_request(DaemonRequest(method="shutdown"))
         if resp.status == "error":
             typer.echo(f"Failed to stop daemon: {resp.error}", err=True)
             raise typer.Exit(code=1)
-    except OSError as e:
-        typer.echo(f"Failed to connect to daemon: {e}", err=True)
+    else:
+        os.kill(pid, signal.SIGTERM)
+
+    if not wait_for_exit(pid):
+        typer.echo(
+            f"Daemon did not exit within {DAEMON_STOP_TIMEOUT:.0f}s. Check log: {LOG_PATH}",
+            err=True,
+        )
         raise typer.Exit(code=1)
     typer.echo("Daemon stopped.")
 
@@ -155,7 +144,7 @@ def daemon_status() -> None:
     result = {
         "status": "running",
         **resp.data,
-        "native_tools": _registry.server_tool_counts(),
+        "native_tools": runtime.registry.server_tool_counts(),
     }
     _output_json(result)
 
@@ -189,7 +178,7 @@ def search(
     top_k: int = typer.Option(5, "--top-k", "-k", help="返回结果数量"),
 ) -> None:
     """混合搜索工具（BM25 + Embedding）。"""
-    local_results = _registry.search(query, top_k=top_k)
+    local_results = runtime.registry.search(query, top_k=top_k)
     _search_and_merge(local_results, "search", query, top_k)
 
 
@@ -200,7 +189,7 @@ def grep(
 ) -> None:
     """正则表达式搜索工具。"""
     try:
-        local_results = _registry.grep(pattern, top_k=limit)
+        local_results = runtime.registry.grep(pattern, top_k=limit)
     except ValueError as e:
         _output_json({"error": str(e)})
         raise typer.Exit(code=1)
@@ -209,12 +198,10 @@ def grep(
 
 def _collect_tool_groups() -> dict[str | None, list[dict]]:
     """收集所有工具并按 server 分组。"""
-    from axi.providers.mcp import MCPProvider
-
     groups: dict[str | None, list[dict]] = {}
 
     # 本地原生工具
-    for meta in _registry.list_all():
+    for meta in runtime.registry.list_all():
         groups.setdefault(meta.server, []).append(
             {"name": meta.name, "description": meta.description}
         )
@@ -231,10 +218,8 @@ def _collect_tool_groups() -> dict[str | None, list[dict]]:
 
     # daemon 未返回工具时，至少从配置列出 server
     if not mcp_tools:
-        provider = MCPProvider()
-        for cfg in provider.load_config():
-            if cfg.server not in groups:
-                groups[cfg.server] = []
+        for server in app_config.mcp_servers:
+            groups.setdefault(server, [])
 
     return groups
 
@@ -291,7 +276,7 @@ def list_tools(
 def _resolve_tool(name: str) -> dict:
     """解析单个工具，返回工具详情 dict 或 error dict。"""
     try:
-        meta = _registry.resolve(name)
+        meta = runtime.registry.resolve(name)
         return meta.model_dump(exclude_none=True)
     except AmbiguousToolError as e:
         return {"error": str(e)}
@@ -302,14 +287,6 @@ def _resolve_tool(name: str) -> dict:
     if resp.status == "success":
         return resp.data
     return {"error": resp.error or f"Tool not found: {name}"}
-
-
-def _daemon_input_schema(tool_name: str) -> dict:
-    """从 daemon 取 MCP 工具的 input_schema；取不到返回 {}（解析退回 JSON 猜类型）。"""
-    resp = daemon_request(DaemonRequest(method="describe", tool_name=tool_name))
-    if resp.status == "success" and isinstance(resp.data, dict):
-        return resp.data.get("input_schema") or {}
-    return {}
 
 
 @app.command()
@@ -345,10 +322,9 @@ def run(
 
     json_str, args = _extract_option(args, "--json", "-j")
 
-    # 先解析工具一次：本地命中 → 原生（进程内执行，schema 就在 meta 上）；
-    # 未命中 → 走 daemon（MCP）。避免解析参数和执行各 resolve 一遍。
+    # 解析参数需要目标 schema；执行分发统一交给 Executor。
     try:
-        meta = _registry.resolve(tool_name)
+        meta = runtime.registry.resolve(tool_name)
     except AmbiguousToolError as e:
         _output_json({"error": str(e)})
         raise typer.Exit(code=1)
@@ -365,20 +341,14 @@ def run(
         parsed = {}
     else:
         # 按目标 schema 解析 --key value（string 字段保留原文）；MCP schema 问 daemon
-        schema = meta.input_schema if meta else _daemon_input_schema(tool_name)
+        schema = (
+            meta.input_schema
+            if meta
+            else _resolve_tool(tool_name).get("input_schema", {})
+        )
         parsed = _parse_params(args, schema)
 
-    if meta is not None:
-        _output_json(_executor.run(meta.full_name, parsed))
-        return
-
-    resp = daemon_request(
-        DaemonRequest(method="call_tool", tool_name=tool_name, params=parsed)
-    )
-    if resp.status == "success":
-        _output_json(RunResult.success(resp.data))
-    else:
-        _output_json(RunResult.fail(resp.error or "Unknown error"))
+    _output_json(runtime.executor.run(tool_name, parsed))
 
 
 @app.command("mcp")
@@ -404,7 +374,7 @@ def mcp_command(
     if flat is None:
         flat = server is not None
     mcp_serve.serve(
-        native_metas=_registry.list_all(),
+        native_metas=runtime.registry.list_all(),
         transport=transport.value,
         servers=server,
         flat=flat,
@@ -427,13 +397,8 @@ def doctor() -> None:
     issues: list[str] = []
 
     # native 工具及其来源（entry_points 自动发现 = 任何已装包都可能注入工具，需可见）
-    try:
-        eps = list(
-            importlib.metadata.entry_points(group=NATIVE_TOOLS_ENTRY_POINT_GROUP)
-        )
-    except Exception:
-        eps = []
-    server_counts = _registry.server_tool_counts()
+    eps = importlib.metadata.entry_points(group=NATIVE_TOOLS_ENTRY_POINT_GROUP)
+    server_counts = runtime.registry.server_tool_counts()
     native = {
         "total": sum(server_counts.values()),
         "servers": server_counts,

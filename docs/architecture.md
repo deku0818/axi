@@ -2,35 +2,26 @@
 
 ## 分层总览
 
-```
-┌──────────────────────────────────────────────┐
-│              AI Agent (bash)                  │
-├──────────────────────────────────────────────┤
-│                axi CLI                        │
-│  search / describe / run / daemon             │
-├──────────┬───────────────────────────────────┤
-│ 原生工具 │         Unix socket               │
-│ Executor │            ↓                       │
-│ (进程内) │      axi daemon                    │
-│          │  ┌─────────┐ ┌─────────────────┐  │
-│          │  │Registry │ │ MCP Provider    │  │
-│          │  │ (索引)  │ │ (连接管理)      │  │
-│          │  └─────────┘ └─────────────────┘  │
-├──────────┴───────────────────────────────────┤
-│              工具来源（Provider）              │
-│  ┌────────────┐ ┌──────────┐ ┌────────────┐ │
-│  │ MCP Server │ │ Python   │ │ 未来:      │ │
-│  │ (stdio 长  │ │ 装饰器   │ │ OpenAPI 等 │ │
-│  │  连接)     │ │ (进程内) │ │            │ │
-│  └────────────┘ └──────────┘ └────────────┘ │
-└──────────────────────────────────────────────┘
+```text
+CLI / Python PTC / MCP 导出
+             │
+        Executor.run
+         ┌───┴─────────────┐
+         │                 │
+     原生 Python        daemon client
+      进程内执行          Unix socket
+                           │
+                       axi daemon
+                     Registry + MCPProvider
+                           │
+                     MCP server 长连接
 ```
 
 ## 核心模块
 
 ### Daemon（后台守护进程）
 
-维持所有 MCP server 的长连接，通过 Unix socket（`~/.axi/daemon.sock`）接受 CLI 请求。
+维持所有 MCP server 的长连接，通过 Unix socket（`~/.axi/daemons/<hash>.sock`）接受 CLI 请求。
 
 职责：
 - 管理 MCP server 连接生命周期
@@ -46,22 +37,21 @@
 #### 自动启动
 
 CLI 执行 `search`、`describe`、`run` 等命令时，`client.py` 的 `ensure_daemon()` 会：
-1. 检查 `~/.axi/daemon.pid` 是否存在且进程存活
-2. 若未运行，通过 `python -m axi.daemon.server` 后台启动
-3. 轮询 socket（最多 30 次，间隔 0.1s）等待 daemon 就绪
+1. 检查当前配置对应的 PID 和 socket，已就绪则复用
+2. 未就绪时获取配置专属的启动文件锁，锁内复查；PID 仍存活则继续等待现有初始化进程，否则通过 `python -m axi.daemon.server` 后台启动
+3. 每 0.1 秒轮询就绪状态，最多等待 60 秒；进程提前退出时立即失败
 
 #### 启动流程
 
 `DaemonServer.start()` 依次执行：
-1. 加载 `axi.json` 配置
-2. 初始化 MCPProvider 和 Registry
-3. 创建 Embedding provider + cache（如果配置了 `search.embedding`）
-4. 连接所有 MCP server（stdio 长连接），获取工具定义并注册到 Registry
-5. 创建 `~/.axi/` 目录，清理旧 socket 文件
-6. 写入 PID 到 `~/.axi/daemon.pid`
-7. 启动 Unix socket server（`~/.axi/daemon.sock`）
-8. 启动 idle watchdog 任务
-9. 注册信号处理（SIGTERM / SIGINT → 优雅关闭）
+1. 加载 `axi.json` 配置，初始化 MCPProvider 和 Registry；按需创建 Embedding provider 和模型隔离缓存
+2. 注册 SIGTERM / SIGINT 处理，确保初始化阶段也能停止
+3. 创建 `~/.axi/daemons/`，清理当前配置的旧 socket，再写入 `<hash>.pid`
+4. 连接 MCP server；每条连接由固定后台任务持有上下文，分页获取全部工具并注册到 Registry；单个 server 失败时关闭其连接并继续
+5. 启动 Unix socket server（`~/.axi/daemons/<hash>.sock`），请求/响应读取上限均为 8 MiB
+6. 启动 idle watchdog 任务
+
+MCP 请求可以在不同请求任务中执行；重连和关闭通过连接的持有任务完成，避免跨任务退出 AnyIO 上下文。并发故障请求共用一次重连，关闭期间的失败请求不会重新拉起连接。
 
 #### Idle Watchdog
 
@@ -81,7 +71,9 @@ daemon 内置空闲检测机制，防止无限占用资源：
 | idle 超时 | watchdog 检测到空闲超时，自动关闭 |
 | SIGTERM / SIGINT | 操作系统信号触发优雅关闭 |
 
-清理步骤：关闭所有 MCP 连接 → 删除 `~/.axi/daemon.sock` → 删除 `~/.axi/daemon.pid`
+清理步骤：关闭 socket listener → 取消 watchdog → 等各 MCP 连接的持有任务完成关闭 → 删除当前配置的 socket/PID → 注销信号处理。
+
+CLI 的 `stop` 等待目标 PID 完成清理后才报告成功，上限 60 秒；PID 被并发启动的新实例替换时不会转而等待新实例。
 
 #### 通信协议
 
@@ -89,7 +81,7 @@ CLI 和 daemon 通过 Unix socket 以 JSON Line 格式通信（每行一个完�
 
 - **请求**（`DaemonRequest`）：`method` + 可选参数（`tool_name`、`params`、`query`、`top_k`）
 - **响应**（`DaemonResponse`）：`status`（"success" / "error"）+ `data` / `error`
-- 客户端超时：30 秒
+- 客户端请求超时：默认 120 秒，可通过配置或 `AXI_REQUEST_TIMEOUT` 调整
 
 ### Registry（工具注册中心）
 
@@ -100,20 +92,19 @@ CLI 和 daemon 通过 Unix socket 以 JSON Line 格式通信（每行一个完�
 - 提供搜索接口（默认 BM25 关键词搜索，可选 Embedding 语义搜索，支持正则匹配）
 - 渐进式披露：search 返回摘要，describe 返回完整 schema
 
-存在两个 Registry 实例：
-- CLI 进程内的 Registry：管理原生 Python 工具
-- daemon 进程内的 Registry：管理 MCP 工具
+Registry 按运行位置分工：
+- `runtime.py` 持有 CLI / Python PTC 共用的原生工具 Registry 和 Executor
+- daemon 持有 MCP 工具 Registry
+- MCP 导出持有所选工具的合并 Registry，执行前检查导出范围
 
-### Executor（原生工具执行层）
+### Executor（统一执行入口）
 
-执行原生 Python 工具，包装结构化输出。
+CLI、Python PTC 和 MCP 导出统一调用 `Executor.run()`：
+- 解析本地工具名称，原生工具按 Pydantic 模型校验后在进程内执行
+- MCP 工具通过 `daemon_request()` 调用，统一转成 RunResult
+- 未在本地找到的名称交给 daemon 解析；名称歧义直接返回错误
 
-职责：
-- 调用 `@tool` 注册的 Python 函数
-- 结构化输出包装（JSON 信封）
-- 错误处理与状态报告
-
-注：MCP 工具不经过 Executor，由 daemon 内的 MCPProvider 直接执行。
+入口只处理自己的协议：CLI 解析参数和输出 JSON，PTC 解包结果，MCP 导出检查工具范围、注入请求变量并转换 MCP 响应。三者不再分别维护执行分发逻辑。
 
 ### Provider（工具来源适配器）
 
@@ -142,14 +133,16 @@ axi
 
 ## 执行流程
 
-```
-axi run server/tool_name --key value
-        │
-        ├─ 原生工具？ → Executor 直接执行 → RunResult
-        │
-        └─ MCP 工具？ → daemon client → Unix socket → daemon server
-                                                        │
-                                                        └─ MCPProvider.call_tool()
-                                                           → MCP server (stdio)
-                                                           → DaemonResponse → RunResult
+```text
+CLI 参数解析 / PTC 调用 / MCP 请求
+                 │
+           Executor.run(name, params)
+                 │
+        ┌────────┴─────────┐
+        │                  │
+  原生参数校验与执行    daemon_request
+        │                  │
+        │             MCPProvider.call_tool
+        └────────┬─────────┘
+              RunResult
 ```

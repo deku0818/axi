@@ -1,28 +1,35 @@
 """Executor 测试：覆盖错误路径和异常处理。"""
 
+import pytest
+
+from axi.daemon.protocol import DaemonResponse
 from axi.executor import Executor
 from axi.models import ToolMeta, ToolSource
-from axi.providers.native import register_tool, _native_functions
+from axi.providers.native import register_tool
 from axi.registry import Registry
 
 
-def _make_registry_with_tool(name: str, source: ToolSource, server: str | None = None):
-    """辅助：创建包含单个工具的 registry。"""
-    r = Registry()
-    kwargs = {"name": name, "description": "test", "source": source}
-    if server:
-        kwargs["server"] = server
-    r.register(ToolMeta(**kwargs))
-    return r
-
-
 class TestExecutorErrors:
-    def test_non_native_tool_rejected(self):
-        registry = _make_registry_with_tool("echo", ToolSource.MCP, server="srv")
-        executor = Executor(registry)
-        result = executor.run("srv/echo", {})
-        assert result.status == "error"
-        assert "daemon" in result.error
+    @pytest.mark.parametrize("known", [False, True])
+    def test_mcp_execution_uses_daemon(self, monkeypatch, known):
+        registry = Registry()
+        if known:
+            registry.register(
+                ToolMeta(
+                    name="echo", server="srv", description="", source=ToolSource.MCP
+                )
+            )
+        calls = []
+
+        def request(req):
+            calls.append(req)
+            return DaemonResponse.success("remote result")
+
+        monkeypatch.setattr("axi.executor.daemon_request", request)
+        result = Executor(registry).run("srv/echo", {"message": "hi"})
+        assert result.data == "remote result"
+        assert calls[0].tool_name == "srv/echo"
+        assert calls[0].params == {"message": "hi"}
 
     def test_tool_exception_captured(self):
         registry = Registry()
@@ -39,32 +46,18 @@ class TestExecutorErrors:
         assert "RuntimeError" in result.error
         assert "boom" in result.error
 
-    def test_native_function_not_registered(self):
-        """Registry 有 meta 但 _native_functions 中没有对应函数。"""
-        registry = Registry()
-        registry.register(
-            ToolMeta(name="ghost_tool", description="test", source=ToolSource.NATIVE)
-        )
-        # 确保函数不在 native 注册表中
-        _native_functions.pop("ghost_tool", None)
-
-        executor = Executor(registry)
-        result = executor.run("ghost_tool", {})
-        assert result.status == "error"
-        assert "Native function not found" in result.error
-
 
 class TestSameNameTools:
     def test_same_name_in_two_modules_not_shadowed(self, tmp_path):
         """两个模块注册同名工具时，各自的 full_name 路由到各自的函数。"""
-        from axi.cli import get_registry
+        from axi import runtime
         from axi.providers.native import _load_native_entry
 
         src = "from axi import tool\n\n@tool(description='{d}')\ndef shadow_ping() -> str:\n    return '{r}'\n"
         (tmp_path / "mod_a.py").write_text(src.format(d="a", r="A"))
         (tmp_path / "mod_b.py").write_text(src.format(d="b", r="B"))
 
-        registry = get_registry()
+        registry = runtime.registry
         loaded: dict[str, str] = {}
         _load_native_entry(registry, str(tmp_path / "mod_a.py"), "mod_a", loaded, "t")
         _load_native_entry(registry, str(tmp_path / "mod_b.py"), "mod_b", loaded, "t")
@@ -134,8 +127,8 @@ class TestParamsValidation:
         def greet(name: str) -> str:
             return f"hi {name}"
 
-        executor = self._executor_with(greet, "greet")
-        result = executor.run("greet", {"name": 42})
+        executor = self._executor_with(greet, "coerce_greet")
+        result = executor.run("coerce_greet", {"name": 42})
         assert result.status == "success"
         assert result.data == "hi 42"
 

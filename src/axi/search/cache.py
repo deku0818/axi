@@ -24,8 +24,9 @@ def content_hash(text: str) -> str:
 class EmbeddingCache:
     """基于文件的 embedding 缓存。"""
 
-    def __init__(self, path: Path = CACHE_FILE) -> None:
+    def __init__(self, path: Path = CACHE_FILE, *, namespace: str = "") -> None:
         self._path = path
+        self._prefix = f"{namespace}:" if namespace else ""
         self._data: dict[str, list[float]] = {}
         self._load()
 
@@ -47,10 +48,7 @@ class EmbeddingCache:
         self._path.write_text(json.dumps(self._data))
 
     def get(self, key: str) -> list[float] | None:
-        return self._data.get(key)
+        return self._data.get(self._prefix + key)
 
     def set(self, key: str, vector: list[float]) -> None:
-        self._data[key] = vector
-
-    def has(self, key: str) -> bool:
-        return key in self._data
+        self._data[self._prefix + key] = vector

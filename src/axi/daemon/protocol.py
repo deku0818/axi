@@ -15,6 +15,9 @@ PID_PATH = os.path.join(SOCKET_DIR, f"{CONFIG_HASH}.pid")
 LOG_PATH = os.path.join(SOCKET_DIR, f"{CONFIG_HASH}.log")
 LOCK_PATH = os.path.join(SOCKET_DIR, f"{CONFIG_HASH}.lock")
 
+# 请求与响应都是单行 JSON，双方使用相同的读取上限。
+STREAM_LIMIT = 8 * 1024 * 1024
+
 
 class DaemonRequest(BaseModel):
     """daemon 请求。"""

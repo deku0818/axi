@@ -14,6 +14,7 @@ from axi.daemon.protocol import (
     SOCKET_DIR,
     SOCKET_PATH,
     PID_PATH,
+    STREAM_LIMIT,
     DaemonRequest,
     DaemonResponse,
     DaemonStatus,
@@ -109,7 +110,7 @@ class DaemonServer:
                 )
 
             server = await asyncio.start_unix_server(
-                self._handle_client, path=SOCKET_PATH
+                self._handle_client, path=SOCKET_PATH, limit=STREAM_LIMIT
             )
             async with server:
                 logger.info(
@@ -123,7 +124,7 @@ class DaemonServer:
             if not self._stopping:
                 raise
         finally:
-            # MCP 的异步上下文必须由建立连接的任务按逆序退出。
+            # 每条 MCP 连接由自己的持有任务清理。
             try:
                 if watchdog:
                     watchdog.cancel()

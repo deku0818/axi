@@ -1,6 +1,9 @@
 """MCP Provider 集成测试。"""
 
 import sys
+import asyncio
+import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -77,6 +80,102 @@ async def test_mcp_tool_error_returns_error_envelope(mock_config):
         assert "kaboom" in result.error
     finally:
         await provider.close_all()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_from_concurrent_request_tasks(mock_config, tmp_path):
+    pid_path = tmp_path / "worker.pid"
+    config = mock_config.model_copy(
+        update={"env": {"AXI_TEST_PID_PATH": str(pid_path)}}
+    )
+    provider = MCPProvider()
+    try:
+        await provider.connect_all([config])
+        old_pid = int(pid_path.read_text())
+        os.kill(old_pid, signal.SIGKILL)
+        await asyncio.sleep(0.1)
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                provider.call_tool(config.server, "echo", {"message": "one"}),
+                provider.call_tool(config.server, "echo", {"message": "two"}),
+            ),
+            timeout=10,
+        )
+        assert [r.status for r in results] == ["success", "success"]
+        assert [r.data for r in results] == ["one", "two"]
+        assert int(pid_path.read_text()) != old_pid
+    finally:
+        await provider.close_all()
+
+
+@pytest.mark.asyncio
+async def test_list_failure_is_cleaned_up_and_does_not_block_other_servers(
+    mock_config, tmp_path
+):
+    pid_path = tmp_path / "failed-worker.pid"
+    bad = mock_config.model_copy(
+        update={
+            "server": "bad",
+            "env": {"AXI_TEST_LIST_ERROR": "1", "AXI_TEST_PID_PATH": str(pid_path)},
+        }
+    )
+    provider = MCPProvider()
+    try:
+        tools = await asyncio.wait_for(provider.connect_all([bad, mock_config]), 10)
+        assert len(tools) == 3
+        assert {t.server for t in tools} == {mock_config.server}
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid_path.read_text()), 0)
+        result = await asyncio.create_task(
+            provider.call_tool(mock_config.server, "echo", {"message": "healthy"})
+        )
+        assert result.data == "healthy"
+    finally:
+        await provider.close_all()
+
+
+@pytest.mark.asyncio
+async def test_list_tools_follows_pagination(mock_config):
+    conn = MCPConnection(
+        mock_config.model_copy(update={"env": {"AXI_TEST_PAGINATED": "1"}})
+    )
+    try:
+        await conn.connect()
+        tools = await conn.list_tools()
+        assert [t.name for t in tools] == ["echo", "add", "boom"]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_inflight_failure_does_not_reconnect_after_shutdown(
+    mock_config, monkeypatch
+):
+    provider = MCPProvider()
+    await provider.connect_all([mock_config])
+    conn = provider._connections[mock_config.server]
+    started = asyncio.Event()
+
+    async def failed_call(name, params):
+        started.set()
+        raise ConnectionError("MCP disconnected")
+
+    monkeypatch.setattr(conn, "call_tool", failed_call)
+    async with conn.reconnect_lock:
+        task = asyncio.create_task(
+            provider.call_tool(mock_config.server, "echo", {"message": "late"})
+        )
+        await started.wait()
+        shutdown = asyncio.create_task(provider.close_all())
+        await asyncio.sleep(0)
+    try:
+        await shutdown
+        result = await asyncio.wait_for(task, 10)
+        assert result.status == "error"
+        assert conn.session is None
+    finally:
+        await task
+        await conn.close()
 
 
 def test_mcp_load_config(monkeypatch):
