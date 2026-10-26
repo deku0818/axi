@@ -11,12 +11,14 @@ from pydantic import BaseModel
 
 from axi.config import CONFIG_PATH, app_config
 from axi.daemon.client import (
+    DAEMON_STOP_TIMEOUT,
     LOG_PATH,
     daemon_request,
     ensure_daemon,
     is_daemon_running,
     read_live_pid,
     send_request,
+    wait_for_exit,
 )
 from axi.daemon.protocol import DaemonRequest
 from axi.executor import Executor
@@ -120,7 +122,7 @@ def daemon_stop() -> None:
             return
         # 启动中（PID 在、socket 未建）：直接终止，不用等它连完 MCP server
         os.kill(pid, signal.SIGTERM)
-        typer.echo("Daemon stopped.")
+        _report_stopped()
         return
 
     try:
@@ -131,7 +133,19 @@ def daemon_stop() -> None:
     except OSError as e:
         typer.echo(f"Failed to connect to daemon: {e}", err=True)
         raise typer.Exit(code=1)
-    typer.echo("Daemon stopped.")
+    _report_stopped()
+
+
+def _report_stopped() -> None:
+    """等进程真正退出后再报告成功，避免随后的 start 撞上仍在收尾的 daemon。"""
+    if wait_for_exit():
+        typer.echo("Daemon stopped.")
+        return
+    typer.echo(
+        f"Daemon did not exit within {DAEMON_STOP_TIMEOUT:.0f}s. Check log: {LOG_PATH}",
+        err=True,
+    )
+    raise typer.Exit(code=1)
 
 
 @daemon_app.command("status")

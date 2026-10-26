@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.13] - 2026-10-26
+
+### Fixed
+- `axi daemon stop` 等进程真正退出后再报告成功：shutdown 响应先于资源清理返回，此前紧接着执行 `axi daemon start` 会因 PID 仍在而被误判 "Daemon is already running"，随后进程退出又变回 `stopped`。现在 CLI 侧轮询到 PID 消失才输出 `Daemon stopped.`，5 秒内没退出则报错并指向日志
+- daemon 退出时不再把正常关闭的 `CancelledError` 当未处理异常打进 `<hash>.log`：`run_daemon()` 吞掉该异常，日志只留 shutdown 的 INFO 记录
+
 ## [0.0.12] - 2026-10-26
 
 ### Fixed

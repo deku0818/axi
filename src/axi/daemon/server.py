@@ -303,7 +303,11 @@ def run_daemon() -> None:
     )
     axi_logger.addHandler(handler)
     server = DaemonServer()
-    asyncio.run(server.start())
+    try:
+        asyncio.run(server.start())
+    except asyncio.CancelledError:
+        # stop() 取消主任务是正常关闭路径，不作为未处理异常打进日志
+        pass
 
 
 if __name__ == "__main__":
