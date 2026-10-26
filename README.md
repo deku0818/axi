@@ -208,6 +208,11 @@ axi daemon stop      # 手动停止
 }
 ```
 
+daemon 启动时先写 PID、再连 MCP server，最后才创建 socket。连接期间（uvx 拉起的
+官方 MCP 冷启动可能要几十秒）status 返回 `{"status": "starting", "pid": 12345}`，
+不是 `stopped`；`axi daemon start` 也会等到就绪或超时，超时但进程仍存活时提示
+"Daemon is still initializing" 而不是启动失败。
+
 ### 文件位置
 
 daemon 按配置文件隔离：每份 `AXI_CONFIG` 对应一个独立 daemon，运行时文件位于 `~/.axi/daemons/`，文件名为配置文件绝对路径的哈希：

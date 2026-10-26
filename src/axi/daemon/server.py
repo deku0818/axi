@@ -83,6 +83,12 @@ class DaemonServer:
         self._start_time = time.monotonic()
         self._last_activity = time.monotonic()
 
+        # 确保 socket 目录存在，并先写 PID。连接 MCP server 可能要数十秒（uvx
+        # 冷启动），这期间 `axi daemon status` 应报 starting 而不是 stopped。
+        os.makedirs(SOCKET_DIR, exist_ok=True)
+        with open(PID_PATH, "w") as f:
+            f.write(str(os.getpid()))
+
         # 加载并连接 MCP servers
         configs = self.mcp_provider.load_config()
         if configs:
@@ -93,16 +99,9 @@ class DaemonServer:
                 "Loaded %d tools from %d MCP server(s)", len(tools), len(configs)
             )
 
-        # 确保 socket 目录存在
-        os.makedirs(SOCKET_DIR, exist_ok=True)
-
         # 清理旧 socket
         if os.path.exists(SOCKET_PATH):
             os.unlink(SOCKET_PATH)
-
-        # 写 PID 文件
-        with open(PID_PATH, "w") as f:
-            f.write(str(os.getpid()))
 
         # 启动 Unix socket server
         self._server = await asyncio.start_unix_server(

@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import signal
 from enum import Enum
 
 import typer
@@ -13,6 +15,7 @@ from axi.daemon.client import (
     daemon_request,
     ensure_daemon,
     is_daemon_running,
+    read_live_pid,
     send_request,
 )
 from axi.daemon.protocol import DaemonRequest
@@ -92,16 +95,32 @@ def daemon_start() -> None:
 
     if ensure_daemon():
         typer.echo("Daemon started.")
+        return
+
+    # PID 在但 socket 未建：daemon 还在连 MCP server，不是启动失败
+    pid = read_live_pid()
+    if pid is not None:
+        typer.echo(
+            f"Daemon is still initializing (pid {pid}). "
+            f"Run `axi daemon status` to check progress; log: {LOG_PATH}",
+            err=True,
+        )
     else:
-        typer.echo(f"Failed to start daemon. Check log: {LOG_PATH}", err=True)
-        raise typer.Exit(code=1)
+        typer.echo(f"Daemon failed to start. Check log: {LOG_PATH}", err=True)
+    raise typer.Exit(code=1)
 
 
 @daemon_app.command("stop")
 def daemon_stop() -> None:
     """停止 daemon。"""
     if not is_daemon_running():
-        typer.echo("Daemon is not running.")
+        pid = read_live_pid()
+        if pid is None:
+            typer.echo("Daemon is not running.")
+            return
+        # 启动中（PID 在、socket 未建）：直接终止，不用等它连完 MCP server
+        os.kill(pid, signal.SIGTERM)
+        typer.echo("Daemon stopped.")
         return
 
     try:
@@ -119,7 +138,13 @@ def daemon_stop() -> None:
 def daemon_status() -> None:
     """查看 daemon 状态。"""
     if not is_daemon_running():
-        _output_json({"status": "stopped"})
+        pid = read_live_pid()
+        # PID 在、socket 未建：daemon 正在连 MCP server
+        _output_json(
+            {"status": "starting", "pid": pid}
+            if pid is not None
+            else {"status": "stopped"}
+        )
         return
 
     resp = send_request(DaemonRequest(method="status"))
