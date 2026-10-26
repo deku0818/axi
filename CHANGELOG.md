@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.12] - 2026-10-26
+
+### Fixed
+- daemon 启动不再误报失败：等待就绪的上限从固定 3 秒改为 60 秒，且子进程中途退出时立刻失败而不是把超时等满。旧窗口对 uvx 拉起的官方 MCP server 太短（首次还要下载依赖），进程其实启动了、`axi daemon start` 却打印 "Failed to start daemon"，随后 `axi daemon status` 又因 socket 尚未创建谎报 `stopped`
+- `axi daemon status` 新增 `starting` 状态：PID 已写、socket 未建时输出 `{"status": "starting", "pid": ...}`，如实反映「正在连 MCP server」
+- `axi daemon start` 超时后若进程仍存活，提示 "Daemon is still initializing" 并给出查状态的下一步，不再一律报失败
+- `axi daemon stop` 可终止启动中的 daemon（此前只看 socket，启动窗口内会报 "Daemon is not running"）
+- 启动时先清理残留 socket 再写 PID，避免异常退出后重启被误判为已就绪
+- 启动期间停止 daemon 会取消 MCP 初始化并回收正在连接和已连接的子进程，同时清理 PID/socket
+
 ## [0.0.11] - 2026-07-31
 
 ### Changed

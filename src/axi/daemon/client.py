@@ -21,7 +21,9 @@ from axi.daemon.protocol import (
 
 logger = logging.getLogger(__name__)
 
-_DAEMON_START_POLL_RETRIES = 30
+# 等待 daemon 就绪的上限。daemon 要先连上所有 MCP server 才创建 socket，
+# 官方 MCP 由 uvx 拉起、首次还要下载依赖，冷启动远超旧的 3 秒窗口。
+_DAEMON_START_TIMEOUT = 60.0  # seconds
 _DAEMON_START_POLL_INTERVAL = 0.1  # seconds
 
 # StreamReader 缓冲区上限。默认 64KB 放不下完整工具列表（list/search 的响应是单行
@@ -29,24 +31,26 @@ _DAEMON_START_POLL_INTERVAL = 0.1  # seconds
 _STREAM_LIMIT = 8 * 1024 * 1024
 
 
-def is_daemon_running() -> bool:
-    """检查 daemon 是否在运行。"""
-    if not os.path.exists(PID_PATH):
-        return False
-
+def read_live_pid() -> int | None:
+    """PID 文件里的进程仍存活时返回 pid，否则 None。"""
     try:
         with open(PID_PATH) as f:
             pid = int(f.read().strip())
         os.kill(pid, 0)
-        return os.path.exists(SOCKET_PATH)
     except (OSError, ValueError):
-        return False
+        return None
+    return pid
+
+
+def is_daemon_running() -> bool:
+    """daemon 已就绪（进程存活且 socket 已创建）时返回 True。"""
+    return read_live_pid() is not None and os.path.exists(SOCKET_PATH)
 
 
 def _spawn_and_wait() -> bool:
     """拉起 daemon 子进程并轮询直到就绪。调用方需持有启动锁。"""
     with open(LOG_PATH, "a") as log_file:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [sys.executable, "-m", "axi.daemon.server"],
             stdout=log_file,
             stderr=log_file,
@@ -54,11 +58,24 @@ def _spawn_and_wait() -> bool:
             env={**os.environ, "AXI_CONFIG": str(CONFIG_PATH)},
         )
 
-    for _ in range(_DAEMON_START_POLL_RETRIES):
-        time.sleep(_DAEMON_START_POLL_INTERVAL)
+    deadline = time.monotonic() + _DAEMON_START_TIMEOUT
+    while time.monotonic() < deadline:
         if is_daemon_running():
             return True
-    logger.error("Daemon failed to start. Check log: %s", LOG_PATH)
+        # 子进程已退出：socket 不会再出现，别把超时时间白等完
+        if proc.poll() is not None:
+            logger.error(
+                "Daemon exited with code %s during startup. Check log: %s",
+                proc.returncode,
+                LOG_PATH,
+            )
+            return False
+        time.sleep(_DAEMON_START_POLL_INTERVAL)
+    logger.error(
+        "Daemon did not become ready within %.0fs. Check log: %s",
+        _DAEMON_START_TIMEOUT,
+        LOG_PATH,
+    )
     return False
 
 

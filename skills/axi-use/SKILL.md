@@ -87,6 +87,7 @@ axi run jina/jina_search --json '{"query":"python async","count":3}'
 | 坑 | 正确做法 |
 |---|---|
 | `axi daemon start`（手动启动） | **不要。** MCP 工具首次调用自动拉起 daemon，空闲 30 分钟自动回收 |
+| `axi daemon status` 报 `starting` | daemon 正在连 MCP server（uvx 冷启动可达数十秒），不是错误；等它变 `running` 再调工具 |
 | MCP 工具没有 `output_example` | 批量处理前先 `axi run` 探一次真实返回结构，再写后续代码 |
 | 工具完整名搞错 | 直接用 `axi search` 返回的 `name` 字段作为完整名，不要自己拼接；所有工具（含原生）都有 `server/tool` 形式 |
 | MCP server 名和 npm 包名混淆 | 以 `axi.json` 里 `mcpServers` 的 **key** 为准（例如 key 是 `jina`，不是 `jina-mcp-tools`） |

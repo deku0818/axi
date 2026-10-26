@@ -134,3 +134,132 @@ class TestCoerceToSchema:
             "port": "abc",
             "msg": [1],
         }
+
+
+class TestDaemonStartupWindow:
+    """启动窗口：daemon 连 MCP server 期间 PID 已写、socket 未建。
+
+    旧实现固定轮询 3 秒就报 "Failed to start daemon"，而 uvx 拉起的官方 MCP
+    冷启动远超这个窗口，于是进程其实起来了、CLI 却报失败，status 也谎报 stopped。
+    """
+
+    def _use_paths(self, monkeypatch, tmp_path, pid: int | None):
+        pid_path = tmp_path / "daemon.pid"
+        sock_path = tmp_path / "daemon.sock"
+        if pid is not None:
+            pid_path.write_text(str(pid))
+        monkeypatch.setattr("axi.daemon.client.PID_PATH", str(pid_path))
+        monkeypatch.setattr("axi.daemon.client.SOCKET_PATH", str(sock_path))
+        return sock_path
+
+    def test_read_live_pid_none_without_file(self, tmp_path, monkeypatch):
+        from axi.daemon.client import read_live_pid
+
+        self._use_paths(monkeypatch, tmp_path, None)
+        assert read_live_pid() is None
+
+    def test_read_live_pid_none_for_dead_process(self, tmp_path, monkeypatch):
+        from axi.daemon.client import read_live_pid
+
+        # 启动失败残留的 PID 文件不能算数
+        self._use_paths(monkeypatch, tmp_path, 4_000_000)
+        assert read_live_pid() is None
+
+    def test_read_live_pid_returns_current_process(self, tmp_path, monkeypatch):
+        import os
+
+        from axi.daemon.client import read_live_pid
+
+        self._use_paths(monkeypatch, tmp_path, os.getpid())
+        assert read_live_pid() == os.getpid()
+
+    def test_is_daemon_running_requires_socket(self, tmp_path, monkeypatch):
+        import os
+
+        from axi.daemon.client import is_daemon_running
+
+        sock = self._use_paths(monkeypatch, tmp_path, os.getpid())
+        # PID 存活但 socket 未建 = 启动中
+        assert is_daemon_running() is False
+        sock.write_text("")
+        assert is_daemon_running() is True
+
+    def test_spawn_fails_fast_when_child_exits(self, tmp_path, monkeypatch):
+        """子进程启动即退出：立刻失败，不把整个超时等满。"""
+        import time
+
+        from axi.daemon.client import _spawn_and_wait
+
+        class ExitedProc:
+            returncode = 1
+
+            def poll(self):
+                return 1
+
+        monkeypatch.setattr("axi.daemon.client.LOG_PATH", str(tmp_path / "d.log"))
+        monkeypatch.setattr("axi.daemon.client.is_daemon_running", lambda: False)
+        monkeypatch.setattr(
+            "axi.daemon.client.subprocess.Popen", lambda *a, **k: ExitedProc()
+        )
+        started = time.monotonic()
+        assert _spawn_and_wait() is False
+        assert time.monotonic() - started < 1.0
+
+    def test_spawn_waits_until_timeout_when_child_alive(self, tmp_path, monkeypatch):
+        """子进程活着但迟迟不就绪：等满超时才失败。"""
+        import time
+
+        from axi.daemon.client import _spawn_and_wait
+
+        class AliveProc:
+            returncode = None
+
+            def poll(self):
+                return None
+
+        monkeypatch.setattr("axi.daemon.client.LOG_PATH", str(tmp_path / "d.log"))
+        monkeypatch.setattr("axi.daemon.client.is_daemon_running", lambda: False)
+        monkeypatch.setattr(
+            "axi.daemon.client.subprocess.Popen", lambda *a, **k: AliveProc()
+        )
+        monkeypatch.setattr("axi.daemon.client._DAEMON_START_TIMEOUT", 0.3)
+        started = time.monotonic()
+        assert _spawn_and_wait() is False
+        assert time.monotonic() - started >= 0.3
+
+    def test_status_reports_starting(self, monkeypatch, capsys):
+        import json
+
+        from axi.cli import daemon_status
+
+        monkeypatch.setattr("axi.cli.is_daemon_running", lambda: False)
+        monkeypatch.setattr("axi.cli.read_live_pid", lambda: 4242)
+        daemon_status()
+        assert json.loads(capsys.readouterr().out) == {
+            "status": "starting",
+            "pid": 4242,
+        }
+
+    def test_status_reports_stopped(self, monkeypatch, capsys):
+        import json
+
+        from axi.cli import daemon_status
+
+        monkeypatch.setattr("axi.cli.is_daemon_running", lambda: False)
+        monkeypatch.setattr("axi.cli.read_live_pid", lambda: None)
+        daemon_status()
+        assert json.loads(capsys.readouterr().out) == {"status": "stopped"}
+
+    def test_start_reports_initializing_not_failed(self, monkeypatch, capsys):
+        import typer
+
+        from axi.cli import daemon_start
+
+        monkeypatch.setattr("axi.cli.is_daemon_running", lambda: False)
+        monkeypatch.setattr("axi.cli.ensure_daemon", lambda: False)
+        monkeypatch.setattr("axi.cli.read_live_pid", lambda: 4242)
+        with pytest.raises(typer.Exit):
+            daemon_start()
+        err = capsys.readouterr().err
+        assert "still initializing" in err
+        assert "Failed" not in err
