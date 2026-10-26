@@ -155,6 +155,10 @@ class MCPProvider:
                 tools = await conn.list_tools()
                 self._connections[config.server] = conn
                 all_tools.extend(tools)
+            except asyncio.CancelledError:
+                # connect 已成功、list_tools 尚未返回时，连接还没交给 _connections。
+                await conn.close()
+                raise
             except Exception:
                 # 连接失败不阻塞其他 server
                 logger.exception("Failed to connect to MCP server '%s'", config.server)
@@ -202,7 +206,8 @@ class MCPProvider:
 
     async def close_all(self) -> None:
         """关闭所有连接。"""
-        for name, conn in self._connections.items():
+        # 连接的 AnyIO 上下文嵌套在同一任务中，必须按建立顺序的逆序退出。
+        for name, conn in reversed(self._connections.items()):
             try:
                 await conn.close()
             except Exception as e:

@@ -7,6 +7,8 @@
 - `axi daemon status` 新增 `starting` 状态：PID 已写、socket 未建时输出 `{"status": "starting", "pid": ...}`，如实反映「正在连 MCP server」
 - `axi daemon start` 超时后若进程仍存活，提示 "Daemon is still initializing" 并给出查状态的下一步，不再一律报失败
 - `axi daemon stop` 可终止启动中的 daemon（此前只看 socket，启动窗口内会报 "Daemon is not running"）
+- 启动时先清理残留 socket 再写 PID，避免异常退出后重启被误判为已就绪
+- 启动期间停止 daemon 会取消 MCP 初始化并回收正在连接和已连接的子进程，同时清理 PID/socket
 
 ## [0.0.11] - 2026-07-31
 

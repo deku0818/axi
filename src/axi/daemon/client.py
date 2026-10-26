@@ -21,7 +21,7 @@ from axi.daemon.protocol import (
 
 logger = logging.getLogger(__name__)
 
-# 等待 daemon 就绪的上限。daemon 要先连上所有 MCP server 才写 PID / socket，
+# 等待 daemon 就绪的上限。daemon 要先连上所有 MCP server 才创建 socket，
 # 官方 MCP 由 uvx 拉起、首次还要下载依赖，冷启动远超旧的 3 秒窗口。
 _DAEMON_START_TIMEOUT = 60.0  # seconds
 _DAEMON_START_POLL_INTERVAL = 0.1  # seconds

@@ -68,10 +68,10 @@ class DaemonServer:
 
     def __init__(self) -> None:
         self.mcp_provider = MCPProvider()
-        self._server: asyncio.Server | None = None
         self._start_time: float = time.monotonic()
         self._last_activity: float = time.monotonic()
-        self._watchdog_task: asyncio.Task | None = None
+        self._run_task: asyncio.Task | None = None
+        self._stopping = False
 
         self._idle_timeout: float = app_config.daemon.idle_timeout_minutes * 60
         self.registry = Registry.from_search_config(app_config.search)
@@ -83,51 +83,58 @@ class DaemonServer:
         self._start_time = time.monotonic()
         self._last_activity = time.monotonic()
 
-        # 确保 socket 目录存在，并先写 PID。连接 MCP server 可能要数十秒（uvx
-        # 冷启动），这期间 `axi daemon status` 应报 starting 而不是 stopped。
-        os.makedirs(SOCKET_DIR, exist_ok=True)
-        with open(PID_PATH, "w") as f:
-            f.write(str(os.getpid()))
-
-        # 加载并连接 MCP servers
-        configs = self.mcp_provider.load_config()
-        if configs:
-            tools = await self.mcp_provider.connect_all(configs)
-            for tool_meta in tools:
-                self.registry.register(tool_meta)
-            logger.info(
-                "Loaded %d tools from %d MCP server(s)", len(tools), len(configs)
-            )
-
-        # 清理旧 socket
-        if os.path.exists(SOCKET_PATH):
-            os.unlink(SOCKET_PATH)
-
-        # 启动 Unix socket server
-        self._server = await asyncio.start_unix_server(
-            self._handle_client, path=SOCKET_PATH
-        )
-
-        logger.info(
-            "Daemon listening on %s (idle timeout: %ds)",
-            SOCKET_PATH,
-            int(self._idle_timeout),
-        )
-
-        # 启动 idle watchdog
-        self._watchdog_task = asyncio.create_task(self._idle_watchdog())
-
-        # 注册信号处理
-        loop = asyncio.get_event_loop()
-
-        def _request_stop() -> None:
-            asyncio.create_task(self.stop())
-
+        self._run_task = asyncio.current_task()
+        self._stopping = False
+        loop = asyncio.get_running_loop()
+        watchdog: asyncio.Task | None = None
         for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, _request_stop)
+            loop.add_signal_handler(sig, self.stop)
 
-        async with self._server:
-            await self._server.serve_forever()
+        try:
+            os.makedirs(SOCKET_DIR, exist_ok=True)
+            # 先清理残留 socket，再发布新 PID，避免把初始化中的进程误判为就绪。
+            if os.path.exists(SOCKET_PATH):
+                os.unlink(SOCKET_PATH)
+            with open(PID_PATH, "w") as f:
+                f.write(str(os.getpid()))
+
+            # 信号处理已就绪，连接 MCP 期间也能取消并回收子进程。
+            configs = self.mcp_provider.load_config()
+            if configs:
+                tools = await self.mcp_provider.connect_all(configs)
+                for tool_meta in tools:
+                    self.registry.register(tool_meta)
+                logger.info(
+                    "Loaded %d tools from %d MCP server(s)", len(tools), len(configs)
+                )
+
+            server = await asyncio.start_unix_server(
+                self._handle_client, path=SOCKET_PATH
+            )
+            async with server:
+                logger.info(
+                    "Daemon listening on %s (idle timeout: %ds)",
+                    SOCKET_PATH,
+                    int(self._idle_timeout),
+                )
+                watchdog = asyncio.create_task(self._idle_watchdog())
+                await server.serve_forever()
+        except asyncio.CancelledError:
+            if not self._stopping:
+                raise
+        finally:
+            # MCP 的异步上下文必须由建立连接的任务按逆序退出。
+            try:
+                if watchdog:
+                    watchdog.cancel()
+                await self.mcp_provider.close_all()
+            finally:
+                for path in (SOCKET_PATH, PID_PATH):
+                    if os.path.exists(path):
+                        os.unlink(path)
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    loop.remove_signal_handler(sig)
+                self._run_task = None
 
     async def _idle_watchdog(self) -> None:
         """定期检查 idle 状态，超时则自动关闭 daemon。"""
@@ -136,25 +143,17 @@ class DaemonServer:
             idle = time.monotonic() - self._last_activity
             if idle > self._idle_timeout:
                 logger.info("Idle timeout reached (%.0fs), shutting down", idle)
-                await self.stop()
+                self.stop()
                 break
 
-    async def stop(self) -> None:
-        """停止 daemon。"""
+    def stop(self) -> None:
+        """请求停止，由主任务取消初始化/监听并统一清理资源。"""
+        if self._stopping:
+            return
+        self._stopping = True
         logger.info("Shutting down daemon...")
-
-        if self._watchdog_task and not self._watchdog_task.done():
-            self._watchdog_task.cancel()
-
-        await self.mcp_provider.close_all()
-
-        if self._server:
-            self._server.close()
-
-        # 清理文件
-        for path in (SOCKET_PATH, PID_PATH):
-            if os.path.exists(path):
-                os.unlink(path)
+        if self._run_task:
+            self._run_task.cancel()
 
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -263,7 +262,7 @@ class DaemonServer:
         return DaemonResponse.fail(result.error or "Unknown error")
 
     async def _handle_shutdown(self, req: DaemonRequest) -> DaemonResponse:
-        asyncio.create_task(self.stop())
+        self.stop()
         return DaemonResponse.success("Daemon shutting down")
 
     async def _handle_status(self, req: DaemonRequest) -> DaemonResponse:
