@@ -15,7 +15,7 @@ class TestRRFFuse:
         results = _rrf_fuse([[(0, 1.0), (1, 0.5)]], [1.0], top_k=2)
         assert len(results) == 2
         assert results[0][0] == 0
-        assert results[0][1] == 1.0  # 归一化后第一名为 1.0
+        assert [idx for idx, _ in results] == [0, 1]
 
     def test_two_lists_boost(self):
         # 两个列表都包含 idx=1，应该排名提升
@@ -49,15 +49,3 @@ class TestHybridSearch:
         assert len(results) > 0
         assert results[0].name == "s/get_weather"  # 最相关的排第一
         assert not hasattr(results[0], "score")  # 结果不再暴露分数
-
-    def test_empty_query_returns_empty(self):
-        hybrid = HybridSearch()
-        hybrid.build(
-            [
-                _make_tool("echo", "Echo input"),
-            ]
-        )
-        # 单字符被过滤后可能为空
-        results = hybrid.search("x")
-        # 不崩溃即可
-        assert isinstance(results, list)

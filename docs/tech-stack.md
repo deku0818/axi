@@ -32,7 +32,8 @@ axi/
 │       ├── __init__.py         # 公开 API: tool 装饰器, tool() 函数
 │       ├── cli.py              # Typer 入口: search / describe / run / daemon
 │       ├── registry.py         # 工具注册中心 + 搜索
-│       ├── executor.py         # 原生工具执行层
+│       ├── runtime.py          # CLI / Python PTC 共用的进程内状态
+│       ├── executor.py         # 原生 / MCP 统一执行入口
 │       ├── models.py           # Pydantic 数据模型（ToolMeta, RunResult 等）
 │       ├── daemon/
 │       │   ├── __init__.py
@@ -61,7 +62,8 @@ axi/
 - **`__init__.py`**：对外暴露 `@tool` 装饰器和 `tool()` 函数，是 PTC 和原生注册的入口
 - **`cli.py`**：Typer app，定义 `axi search`、`axi describe`、`axi run`、`axi daemon` 子命令
 - **`registry.py`**：工具注册中心，维护元数据索引，提供搜索接口
-- **`executor.py`**：原生工具执行层，包装结构化输出
+- **`runtime.py`**：持有 CLI 与 Python PTC 共用的 Registry 和 Executor；库导入不依赖 Typer CLI
+- **`executor.py`**：统一执行入口，原生工具在进程内调用，MCP 工具交给 daemon，统一包装结果
 - **`models.py`**：Pydantic 模型，定义 ToolMeta、RunResult 等核心数据结构
 - **`daemon/server.py`**：daemon 主进程，维持 MCP 连接，监听 Unix socket 处理请求
 - **`daemon/client.py`**：CLI 侧客户端，向 daemon 发送请求并接收响应
@@ -70,5 +72,5 @@ axi/
 - **`providers/native.py`**：`@tool` 装饰器实现，从函数签名提取 schema 并注册；加载 `nativeTools` 配置（对象格式 `{"module": "...", "name": "..."}`，name 可选，自动推导）
 - **`search/bm25.py`**：BM25 关键词搜索实现，基于 bm25s + jieba 分词
 - **`search/embedding.py`**：Embedding 语义搜索实现，通过 LangChain 接入 Jina/OpenAI
-- **`search/hybrid.py`**：混合搜索，通过 RRF（Reciprocal Rank Fusion）融合 BM25 和 Embedding 结果，分数归一化到 0-1
+- **`search/hybrid.py`**：混合搜索，通过 RRF（Reciprocal Rank Fusion）融合 BM25 和 Embedding 结果，只输出相关性排序后的工具摘要
 - **`search/regex.py`**：正则匹配实现

@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -143,15 +143,15 @@ def load_config(path: Path) -> AxiConfig:
     """读取并解析配置文件。找不到文件则返回默认配置，格式错误则报错退出。"""
     if not path.exists():
         return AxiConfig()
-    with open(path) as f:
-        try:
-            raw = json.load(f)
-        except json.JSONDecodeError as e:
-            raise SystemExit(f"Error: Malformed config file {path}: {e}")
     try:
+        raw = json.loads(path.read_text())
         return AxiConfig.model_validate(raw)
-    except Exception as e:
-        raise SystemExit(f"Error: Invalid config in {path}: {e}")
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"Error: Malformed config file {path}: {e}") from e
+    except ValidationError as e:
+        raise SystemExit(f"Error: Invalid config in {path}: {e}") from e
+    except OSError as e:
+        raise SystemExit(f"Error: Failed to load config: {e}") from e
 
 
 def _warn_ignored_local_config() -> None:
@@ -164,15 +164,5 @@ def _warn_ignored_local_config() -> None:
         )
 
 
-def _load_app_config() -> AxiConfig:
-    """延迟加载配置，捕获异常并输出友好信息。"""
-    _warn_ignored_local_config()
-    try:
-        return load_config(CONFIG_PATH)
-    except SystemExit:
-        raise
-    except Exception as e:
-        raise SystemExit(f"Error: Failed to load config: {e}")
-
-
-app_config: AxiConfig = _load_app_config()
+_warn_ignored_local_config()
+app_config = load_config(CONFIG_PATH)

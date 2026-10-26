@@ -28,7 +28,7 @@ AI Agent 与外部系统之间的统一工具层。通过 CLI 作为万能适配
 - **设计原则**：渐进式披露（search → describe → run）
 - **工具来源**：MCP 导入（axi.json mcpServers）/ Python `@tool` 装饰器原生注册（axi.json nativeTools，对象格式 `{"module": "...", "name": "..."}`，module 支持文件路径和模块路径，name 可选自动推导）
 - **MCP 执行**：通过 daemon 长连接，支持有状态 MCP server（如 browser MCP）
-- **搜索策略**：BM25（bm25s + jieba 分词，默认） + Embedding（Jina/OpenAI API，可选） + 正则（`axi grep`）；混合搜索用 RRF 融合，分数归一化到 0-1
+- **搜索策略**：BM25（bm25s + jieba 分词，默认） + Embedding（Jina/OpenAI API，可选） + 正则（`axi grep`）；混合搜索用 RRF 融合，只输出相关性排序后的工具摘要
 - **搜索配置**：`axi.json` 的 `search.embedding` 段，支持 `provider`（"jina"/"openai"）、`apiKey`（可选，不填从环境变量读 `JINA_API_KEY`/`OPENAI_API_KEY`）、`model`（可选）、`baseUrl`（可选）
 - **输出**：统一紧凑 JSON
 
@@ -41,7 +41,8 @@ src/axi/
 ├── __init__.py         # 公开 API: @tool 装饰器, tool() 函数
 ├── cli.py              # Typer 入口: search / grep / describe / run / daemon
 ├── registry.py         # 工具注册中心 + 搜索
-├── executor.py         # 原生工具执行层
+├── runtime.py          # CLI / Python PTC 共用的进程内状态
+├── executor.py         # 原生 / MCP 统一执行入口
 ├── models.py           # Pydantic 数据模型
 ├── daemon/
 │   ├── server.py       # daemon 主进程：维持 MCP 连接，监听 Unix socket

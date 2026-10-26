@@ -95,7 +95,7 @@ Python 原生工具模块声明。通过 `@tool` 装饰器注册的函数自动�
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `module` | string | 是 | Python 模块路径或文件路径 |
+| `module` | string | 是 | Python 模块路径或文件路径；相对 `.py` 路径以配置文件所在目录为基准 |
 | `name` | string | 否 | server 名，省略时自动推导（文件取 stem，模块取末段） |
 
 ---
@@ -200,7 +200,9 @@ Daemon 进程配置。
 - `<hash>.log` — daemon 启动和错误日志
 - `<hash>.lock` — 启动文件锁，串行化并发进程对 daemon 的拉起
 
-Embedding 缓存同样按配置隔离，位于 `~/.axi/cache/<hash>.json`。
+Embedding 缓存同样按配置隔离，位于 `~/.axi/cache/<hash>.json`。文件内的缓存键还包含
+provider、model、baseUrl 的命名空间；切换模型或端点会重新生成向量，旧缓存不会误用。
+API key 不写入缓存标识。Embedding 网络/限流等 SDK 异常会回退 BM25 搜索。
 
 ---
 

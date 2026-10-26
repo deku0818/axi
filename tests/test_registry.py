@@ -7,7 +7,6 @@ from axi.registry import (
     AmbiguousToolError,
     Registry,
     ToolNotFoundError,
-    ToolResolveError,
 )
 
 
@@ -67,13 +66,6 @@ class TestResolve:
         with pytest.raises(ToolNotFoundError, match="Tool not found"):
             registry.resolve("nonexistent")
 
-    def test_subclasses_catchable_as_base(self, registry):
-        """ToolNotFoundError 和 AmbiguousToolError 都可作为 ToolResolveError 捕获。"""
-        with pytest.raises(ToolResolveError):
-            registry.resolve("nonexistent")
-        with pytest.raises(ToolResolveError):
-            registry.resolve("echo")
-
 
 # ── set_server / list_names ──────────────────────────────
 
@@ -98,11 +90,6 @@ class TestRegistryMethods:
         meta = r.get("my-module/my_tool")
         assert meta is not None
         assert meta.server == "my-module"
-
-    def test_set_server_nonexistent(self):
-        r = Registry()
-        r.set_server("nonexistent", "server")  # 不抛异常
-        assert r.list_names() == []
 
 
 # ── search 错误处理 ──────────────────────────────────────

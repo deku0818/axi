@@ -149,7 +149,7 @@ axi grep "query_.*"            # 正则精确匹配
 
 搜索策略：
 - **BM25**（默认）：基于 bm25s + jieba 分词的关键词相关性排序，支持中英文，适合自然语言查询
-- **Embedding**（可选）：通过 Jina/OpenAI 等 provider 进行语义搜索（LangChain 接入），在 `axi.json` 中配置 `search.embedding` 启用。启用后与 BM25 通过 RRF（Reciprocal Rank Fusion）混合排序，分数归一化到 0-1
+- **Embedding**（可选）：通过 Jina/OpenAI 等 provider 进行语义搜索（LangChain 接入），在 `axi.json` 中配置 `search.embedding` 启用。启用后与 BM25 通过 RRF（Reciprocal Rank Fusion）混合排序，只输出相关性排序后的工具摘要
 - **正则**：精确匹配，适合 Agent 知道部分名称的场景
 
 ### 工具描述

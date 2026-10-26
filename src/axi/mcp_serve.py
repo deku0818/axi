@@ -24,7 +24,7 @@ from axi.context import set_request_env
 from axi.daemon.client import daemon_request
 from axi.daemon.protocol import LOG_PATH, DaemonRequest
 from axi.executor import Executor
-from axi.models import RunResult, ToolMeta, ToolSource
+from axi.models import RunResult, ToolMeta
 from axi.registry import Registry, ToolResolveError, split_names
 
 logger = logging.getLogger(__name__)
@@ -96,33 +96,15 @@ async def _execute(
     name: str,
     params: dict[str, Any],
 ) -> RunResult:
-    """按来源分发执行：native 进程内，MCP 转发 daemon。
-
-    native 执行前把当前 HTTP 请求的 Axi-* header 写入请求级变量
-    （stdio 无请求对象，置空）；MCP 工具在 daemon 进程执行，读不到
-    contextvar，不捕获。
-
-    Executor.run 与 send_request 内部都会 asyncio.run，
-    必须放到 worker 线程执行以避免嵌套事件循环。
-    """
+    """限定导出的工具范围，注入请求变量，再交给共用执行入口。"""
     try:
         meta = registry.resolve(name)
     except ToolResolveError as e:
         return RunResult.fail(str(e))
 
-    if meta.source == ToolSource.NATIVE:
-        request = ctx.request
-        set_request_env(request.headers if request else None)
-        return await asyncio.to_thread(executor.run, meta.full_name, params)
-
-    # daemon_request 内含 ensure_daemon：daemon idle 自杀后长驻 serve 进程可自动重启它
-    resp = await asyncio.to_thread(
-        daemon_request,
-        DaemonRequest(method="call_tool", tool_name=meta.full_name, params=params),
-    )
-    if resp.status == "success":
-        return RunResult.success(resp.data)
-    return RunResult.fail(resp.error or "Unknown error")
+    request = ctx.request
+    set_request_env(request.headers if request else None)
+    return await asyncio.to_thread(executor.run, meta.full_name, params)
 
 
 def _result(data: Any, is_error: bool = False) -> types.CallToolResult:

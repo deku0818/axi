@@ -36,10 +36,14 @@ for line in sys.stdin:
                   'capabilities': {'tools': {}},
                   'serverInfo': {'name': name, 'version': '1'}}
     elif method == 'tools/list':
-        result = {'tools': []}
+        result = {'tools': [{'name': 'echo', 'description': 'Echo text',
+                  'inputSchema': {'type': 'object', 'properties': {'message': {'type': 'string'}}}}]}
+    elif method == 'tools/call':
+        result = {'content': [{'type': 'text', 'text': request['params']['arguments']['message']}]}
     else:
         continue
     print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
+time.sleep(float(sys.argv[4]))
 """
 
 
@@ -61,7 +65,7 @@ def _alive(pid: int) -> bool:
 
 @contextmanager
 def _daemon(
-    block_on: str, *, stale_socket: bool = False
+    block_on: str, *, stale_socket: bool = False, exit_delay: float = 0
 ) -> Iterator[tuple[subprocess.Popen[bytes], dict[str, str], Path, Path]]:
     # macOS 的 Unix socket 路径长度有限，不能使用 pytest 的长临时目录。
     with tempfile.TemporaryDirectory(prefix="axi-test-", dir="/tmp") as directory:
@@ -75,7 +79,13 @@ def _daemon(
                     "mcpServers": {
                         name: {
                             "command": sys.executable,
-                            "args": [str(worker), str(root), name, stage],
+                            "args": [
+                                str(worker),
+                                str(root),
+                                name,
+                                stage,
+                                str(exit_delay),
+                            ],
                         }
                         for name, stage in (
                             ("ready-a", ""),
@@ -130,7 +140,7 @@ def _cli(env: dict[str, str], command: str) -> str:
         env=env,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=15,
         check=True,
     ).stdout
 
@@ -167,4 +177,59 @@ def test_stop_during_startup_reaps_all_mcp_processes(block_on: str) -> None:
     with _daemon(block_on) as (proc, env, root, sock_path):
         _wait_for(lambda: (root / "blocked").exists())
         assert json.loads(_cli(env, "status"))["status"] == "starting"
+        _stop_and_check_cleanup(proc, env, root, sock_path)
+
+
+def test_stop_allows_sequential_mcp_shutdown_grace_periods() -> None:
+    # 三个 MCP 在 stdin EOF 后不自行退出，SDK 各等待 2 秒后再终止。
+    with _daemon("", exit_delay=30) as (proc, env, root, sock_path):
+        _wait_for(sock_path.exists)
+        _stop_and_check_cleanup(proc, env, root, sock_path)
+
+
+def test_ensure_daemon_reuses_process_still_initializing() -> None:
+    with _daemon("initialize") as (proc, env, root, sock_path):
+        _wait_for(lambda: (root / "blocked").exists())
+        code = """
+from axi.daemon import client
+def unexpected_spawn(*args, **kwargs):
+    raise AssertionError('Already-starting daemon must be reused')
+client.subprocess.Popen = unexpected_spawn
+client._DAEMON_START_TIMEOUT = 0.2
+assert client.ensure_daemon() is False
+print(client.read_live_pid())
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode == 0, result.stderr
+        assert int(result.stdout) == proc.pid
+        (root / "release").touch()
+        _wait_for(sock_path.exists)
+        _stop_and_check_cleanup(proc, env, root, sock_path)
+
+
+def test_large_tool_request_and_response() -> None:
+    with _daemon("") as (proc, env, root, sock_path):
+        _wait_for(sock_path.exists)
+        code = """
+from axi.daemon.client import send_request
+from axi.daemon.protocol import DaemonRequest
+text = '好' * 40000
+resp = send_request(DaemonRequest(method='call_tool', tool_name='ready-a/echo', params={'message': text}))
+assert resp.status == 'success', resp.error
+assert resp.data == text
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
         _stop_and_check_cleanup(proc, env, root, sock_path)

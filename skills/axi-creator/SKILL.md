@@ -34,6 +34,7 @@ def query_orders(region: str, limit: int = 10) -> dict:
 ```
 
 **就这一步就够了——函数被 import 时自动注册。** `input_schema` 由 axi 从 type hints 提取（用 Pydantic `create_model`），不用自己写 JSON Schema。
+命名装饰器用 `@tool(name="query_orders")`；description 可省略并取 docstring。`tool("server/tool")` 用于获取调用句柄。
 
 ### 写出好 schema（决定 Agent 用起来的难度）
 
@@ -93,6 +94,7 @@ CLI 和 stdio 形态下它就是环境变量；但当工具经 `axi mcp --transp
 ```
 
 `axi.json` 是 `AXI_CONFIG` 环境变量指向的文件（缺省 `~/.axi/axi.json`，**不会从当前目录发现**）。项目级配置在项目里放一份 axi.json 并 `export AXI_CONFIG=/path/to/axi.json`（direnv 最省事）。
+`nativeTools[].module` 的相对 `.py` 路径以该配置文件所在目录为基准，切换执行目录不影响定位。
 
 **方式 2：分发给别人用 → pip 包 + `pyproject.toml` entry_points**
 

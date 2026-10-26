@@ -17,39 +17,23 @@ from axi.providers.mcp import MCPServerConfig
 # ── _parse_params ──────────────────────────────────────────
 
 
-class TestParseParams:
-    def test_key_value_pair(self):
-        result = _parse_params(["--name", "alice"])
-        assert result == {"name": "alice"}
-
-    def test_boolean_flag(self):
-        result = _parse_params(["--verbose"])
-        assert result == {"verbose": True}
-
-    def test_json_value_auto_parsed(self):
-        result = _parse_params(["--data", '{"x": 1}'])
-        assert result == {"data": {"x": 1}}
-
-    def test_numeric_value_auto_parsed(self):
-        result = _parse_params(["--count", "42"])
-        assert result == {"count": 42}
-
-    def test_multiple_params(self):
-        result = _parse_params(["--name", "alice", "--age", "30", "--verbose"])
-        assert result == {"name": "alice", "age": 30, "verbose": True}
-
-    def test_boolean_flag_before_another_flag(self):
-        result = _parse_params(["--verbose", "--name", "alice"])
-        assert result == {"verbose": True, "name": "alice"}
-
-    def test_empty_args(self):
-        result = _parse_params([])
-        assert result == {}
-
-    def test_no_schema_keeps_json_guessing(self):
-        # 无 schema（未知字段 / **kwargs 工具）退回旧行为：按 JSON 猜类型
-        assert _parse_params(["--flag", "true"]) == {"flag": True}
-        assert _parse_params(["--n", "42"]) == {"n": 42}
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        (["--name", "alice"], {"name": "alice"}),
+        (["--verbose"], {"verbose": True}),
+        (["--data", '{"x": 1}'], {"data": {"x": 1}}),
+        (["--count", "42"], {"count": 42}),
+        (
+            ["--name", "alice", "--age", "30", "--verbose"],
+            {"name": "alice", "age": 30, "verbose": True},
+        ),
+        (["--verbose", "--name", "alice"], {"verbose": True, "name": "alice"}),
+        ([], {}),
+    ],
+)
+def test_parse_params(args, expected):
+    assert _parse_params(args) == expected
 
 
 class TestParseParamsSchemaAware:

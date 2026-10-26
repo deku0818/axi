@@ -266,14 +266,21 @@ class TestDaemonStartupWindow:
 
 
 class TestDaemonStopWait:
-    """stop 要等进程真正退出，否则紧接着的 start 会撞上仍在收尾的 daemon。"""
+    """stop 要等目标 daemon 清理完成，随后 start 才能启动新实例。"""
 
     def test_wait_for_exit_returns_true_when_pid_disappears(self, monkeypatch):
         from axi.daemon.client import wait_for_exit
 
         pids = iter([1234, 1234, None])
         monkeypatch.setattr("axi.daemon.client.read_live_pid", lambda: next(pids))
-        assert wait_for_exit(timeout=1.0) is True
+        assert wait_for_exit(1234, timeout=1.0) is True
+
+    def test_wait_for_exit_does_not_follow_replacement(self, monkeypatch):
+        from axi.daemon.client import wait_for_exit
+
+        pids = iter([1234, 5678])
+        monkeypatch.setattr("axi.daemon.client.read_live_pid", lambda: next(pids))
+        assert wait_for_exit(1234, timeout=1.0) is True
 
     def test_wait_for_exit_times_out(self, monkeypatch):
         import time
@@ -282,7 +289,7 @@ class TestDaemonStopWait:
 
         monkeypatch.setattr("axi.daemon.client.read_live_pid", lambda: 1234)
         started = time.monotonic()
-        assert wait_for_exit(timeout=0.2) is False
+        assert wait_for_exit(1234, timeout=0.2) is False
         assert time.monotonic() - started >= 0.2
 
     def test_stop_waits_before_reporting(self, monkeypatch, capsys):
@@ -290,17 +297,42 @@ class TestDaemonStopWait:
         from axi.daemon.protocol import DaemonResponse
 
         waited = []
+        monkeypatch.setattr("axi.cli.read_live_pid", lambda: 1234)
         monkeypatch.setattr("axi.cli.is_daemon_running", lambda: True)
+
+        def shutdown(req):
+            # 响应返回前，新 daemon 已替换 PID 文件。
+            monkeypatch.setattr("axi.cli.read_live_pid", lambda: 5678)
+            return DaemonResponse.success(None)
+
+        monkeypatch.setattr("axi.cli.send_request", shutdown)
         monkeypatch.setattr(
-            "axi.cli.send_request", lambda req: DaemonResponse.success(None)
-        )
-        monkeypatch.setattr(
-            "axi.cli.wait_for_exit", lambda: waited.append(True) or True
+            "axi.cli.wait_for_exit",
+            lambda pid: waited.append(pid) or True,
         )
 
         daemon_stop()
 
-        assert waited == [True]
+        assert waited == [1234]
+        assert "Daemon stopped." in capsys.readouterr().out
+
+    def test_stop_starting_daemon_uses_original_pid(self, monkeypatch, capsys):
+        import signal
+
+        from axi.cli import daemon_stop
+
+        killed = []
+        waited = []
+        monkeypatch.setattr("axi.cli.read_live_pid", lambda: 1234)
+        monkeypatch.setattr("axi.cli.is_daemon_running", lambda: False)
+        monkeypatch.setattr("axi.cli.os.kill", lambda *args: killed.append(args))
+        monkeypatch.setattr(
+            "axi.cli.wait_for_exit",
+            lambda pid: waited.append(pid) or True,
+        )
+        daemon_stop()
+        assert killed == [(1234, signal.SIGTERM)]
+        assert waited == [1234]
         assert "Daemon stopped." in capsys.readouterr().out
 
     def test_stop_reports_failure_when_process_outlives_timeout(
@@ -311,36 +343,13 @@ class TestDaemonStopWait:
         from axi.cli import daemon_stop
         from axi.daemon.protocol import DaemonResponse
 
+        monkeypatch.setattr("axi.cli.read_live_pid", lambda: 1234)
         monkeypatch.setattr("axi.cli.is_daemon_running", lambda: True)
         monkeypatch.setattr(
             "axi.cli.send_request", lambda req: DaemonResponse.success(None)
         )
-        monkeypatch.setattr("axi.cli.wait_for_exit", lambda: False)
+        monkeypatch.setattr("axi.cli.wait_for_exit", lambda pid: False)
 
         with pytest.raises(typer.Exit):
             daemon_stop()
         assert "did not exit" in capsys.readouterr().err
-
-
-class TestRunDaemon:
-    def test_swallows_cancelled_error_on_shutdown(self, monkeypatch):
-        """stop() 取消主任务是正常关闭，不该让 asyncio.run 把 traceback 打进日志。"""
-        import asyncio
-
-        from axi.daemon import server as server_mod
-
-        async def cancelled_start(self):
-            raise asyncio.CancelledError
-
-        monkeypatch.setattr(server_mod.DaemonServer, "start", cancelled_start)
-        server_mod.run_daemon()  # 不抛即通过
-
-    def test_propagates_other_errors(self, monkeypatch):
-        from axi.daemon import server as server_mod
-
-        async def broken_start(self):
-            raise RuntimeError("boom")
-
-        monkeypatch.setattr(server_mod.DaemonServer, "start", broken_start)
-        with pytest.raises(RuntimeError):
-            server_mod.run_daemon()

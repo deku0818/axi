@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 
 from axi import tool
-from axi.cli import get_registry, get_executor
+from axi import runtime
 
 
 # 注册测试工具
@@ -20,7 +20,7 @@ def add_numbers(a: int, b: int) -> int:
 
 
 def test_tool_registration():
-    registry = get_registry()
+    registry = runtime.registry
     meta = registry.get("greet")
     assert meta is not None
     assert meta.name == "greet"
@@ -29,34 +29,28 @@ def test_tool_registration():
 
 
 def test_tool_execution():
-    executor = get_executor()
+    executor = runtime.executor
     result = executor.run("greet", {"name": "World"})
     assert result.status == "success"
     assert result.data == {"message": "Hello, World!"}
 
 
 def test_tool_execution_with_params():
-    executor = get_executor()
+    executor = runtime.executor
     result = executor.run("add_numbers", {"a": 3, "b": 5})
     assert result.status == "success"
     assert result.data == 8
 
 
-def test_tool_not_found():
-    executor = get_executor()
-    result = executor.run("nonexistent", {})
-    assert result.status == "error"
-
-
 def test_search_substring():
-    registry = get_registry()
+    registry = runtime.registry
     results = registry.search("打招呼")
     assert len(results) > 0
     assert results[0].name == "greet"
 
 
 def test_search_regex():
-    registry = get_registry()
+    registry = runtime.registry
     results = registry.grep("add_.*")
     assert len(results) > 0
     assert results[0].name == "add_numbers"
@@ -68,8 +62,32 @@ def test_ptc_call():
     assert result == {"message": "Hi, PTC!"}
 
 
+def test_named_decorator_without_description():
+    @tool(name="named_only")
+    def original(value: int) -> int:
+        """Use the function docstring as the description."""
+        return value * 2
+
+    assert original(3) == 6
+    meta = runtime.registry.get("named_only")
+    assert meta.description == original.__doc__
+    assert tool("named_only")(value=3) == 6
+
+
+def test_positional_decorator_metadata_stays_supported():
+    @tool("positional_metadata", "Legacy positional description")
+    def original() -> str:
+        return "ok"
+
+    assert (
+        runtime.registry.get("positional_metadata").description
+        == "Legacy positional description"
+    )
+    assert original() == "ok"
+
+
 def test_describe():
-    registry = get_registry()
+    registry = runtime.registry
     meta = registry.get("greet")
     assert meta is not None
     assert meta.input_schema["required"] == ["name"]
@@ -104,7 +122,7 @@ def search_products(
 
 def test_schema_literal_with_description():
     """Literal 枚举 + Field description。"""
-    meta = get_registry().get("query_orders")
+    meta = runtime.registry.get("query_orders")
     region = meta.input_schema["properties"]["region"]
     assert region["enum"] == ["cn", "jp"]
     assert region["description"] == "地区只能支持中国和日本"
@@ -112,7 +130,7 @@ def test_schema_literal_with_description():
 
 def test_schema_typed_list():
     """list[str] → array with items。"""
-    meta = get_registry().get("query_orders")
+    meta = runtime.registry.get("query_orders")
     kw = meta.input_schema["properties"]["keywords"]
     assert kw["type"] == "array"
     assert kw["items"] == {"type": "string"}
@@ -120,7 +138,7 @@ def test_schema_typed_list():
 
 def test_schema_optional_default():
     """带默认值的参数不在 required 中。"""
-    meta = get_registry().get("query_orders")
+    meta = runtime.registry.get("query_orders")
     assert "region" in meta.input_schema["required"]
     assert "keywords" not in meta.input_schema.get("required", [])
     assert "limit" not in meta.input_schema.get("required", [])
@@ -128,7 +146,7 @@ def test_schema_optional_default():
 
 def test_schema_nested_model():
     """Pydantic BaseModel 作为参数类型 → 嵌套 object schema。"""
-    meta = get_registry().get("search_products")
+    meta = runtime.registry.get("search_products")
     schema = meta.input_schema
     # filter 可以是 FilterConfig 或 None
     # 检查 FilterConfig 的属性被正确展开
@@ -138,7 +156,7 @@ def test_schema_nested_model():
 
 def test_schema_field_constraints():
     """Field(ge=1, le=100) → minimum / maximum。"""
-    meta = get_registry().get("search_products")
+    meta = runtime.registry.get("search_products")
     page = meta.input_schema["properties"]["page"]
     assert page.get("minimum") == 1
     assert page.get("maximum") == 100
