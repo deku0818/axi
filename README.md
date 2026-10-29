@@ -1,242 +1,272 @@
 # axi
 
-Agent eXecution Interface — AI Agent 与外部系统之间的统一工具层。
+**Agent eXecution Interface — 让 Agent 按需发现外部工具，用 CLI、MCP 或 Python 代码统一调用。**
 
-通过 CLI 作为万能适配器，将 MCP server 和 Python 函数统一为可搜索、可描述、可调用的命令。Agent 无需猜测命令格式或解析人类可读输出，所有交互都是结构化 JSON。
+axi 将已有 MCP server 和 Python 函数接入同一套工具接口。API、第三方 SDK 和业务逻辑可以包装成 Python 函数，一次注册，同时获得 CLI、MCP 和程序化调用能力；已有 MCP 工具也可以直接转为 CLI 和 Python 调用。
 
-## 核心理念
+## 为什么需要 axi？
 
-几乎所有主流 Agent 框架都把 bash 作为基础能力。axi 在这个"万能通道"之上建一层 Agent-native 的工具层：
+### 按需发现，减少上下文中的工具定义
 
-- **渐进式披露** — `search → describe → run`，按需获取信息，不吃 context window
-- **Agent-first 输出** — 统一紧凑 JSON，无表格、无颜色、无进度条
-- **双来源统一** — MCP server 和原生 Python 工具，对 Agent 来说是同一套接口
+当 MCP 客户端把所有工具定义预先提供给模型时，即使一次任务只用 30 个工具中的一两个，其余工具的描述和参数 schema 仍会占据上下文。低频工具也会带来持续的 token 开销。
+
+axi 采用**渐进式披露（Progressive Disclosure）**：工具保存在 axi 的注册表中，Agent 需要某项能力时再搜索，只读取候选工具的完整参数。
+
+```text
+search / grep → 工具摘要 → describe → 参数 schema → run
+```
+
+通过 CLI 使用时，无需把这些工具逐个注册到模型的工具列表；偏好 MCP 的 Agent 可以只接入 `search / grep / describe / run` 四个元工具。发现结果、选中工具的 schema 和执行结果仍会进入上下文，但无需预先加载整个工具集。
+
+### 用代码组合调用，减少模型往返
+
+**PTC（Programmatic Tool Calling）**允许 Agent 写一段 Python，完成循环、批量调用、工具之间的数据传递，以及本地过滤和聚合，再把需要的结果返回给模型。
+
+这样无需让模型为每一步分别生成调用参数、等待结果、再决定下一次调用。独立请求还可以在代码中安排并发；axi 的 Python 调用接口本身是同步的，并发由调用方控制。
+
+### 一次接入，多种使用方式
+
+```text
+已有 MCP server ─────────┐                 ┌─ CLI：axi search / describe / run
+                       ├─ axi 工具注册表 ─┼─ Python：tool("server/name")(**params)
+API / SDK / 函数 → @tool ┘                 └─ MCP：四个元工具 / 逐个暴露工具
+```
+
+| 需求 | 使用方式 |
+|---|---|
+| Agent 能执行 shell 命令 | 用 CLI 搜索、查看和调用工具 |
+| 批量执行、跨工具组合、过滤聚合 | 用 Python PTC，将流程写成程序 |
+| Agent 使用 MCP，需要按需发现大量工具 | 用 `axi mcp` 导出四个元工具 |
+| MCP 客户端需要直接看到某组工具 | 用 `axi mcp --server <name>` 平铺导出 |
 
 ## 安装
 
+需要 Python 3.12+。当前 daemon 使用 Unix socket 和 `fcntl`，适用于 macOS / Linux；Windows 可在 WSL 中使用。
+
 ```bash
-# 需要 Python 3.12+, uv
+# 安装 CLI（包名是 axi-cli，命令名是 axi）
+uv tool install axi-cli
+
+# 在 Python 项目中使用 PTC，将 axi 安装到该项目环境
+uv add axi-cli
+
+# 从源码开发
 uv sync
+uv run axi --help
 ```
 
-## 快速开始
+`uv tool install` 使用隔离环境，不会让其他 Python 环境自动获得 `import axi`。临时运行 PTC 脚本也可以使用 `uv run --with axi-cli python batch.py`。
 
-```bash
-# 搜索工具
-axi search "web"
+## 五分钟跑通：一个函数，三个入口
 
-# 查看工具详情
-axi describe jina/jina_search
+下面的示例只使用本地数据，无需 API key 或外部服务。
 
-# 执行工具
-axi run jina/jina_search --query "hello world" --count 3
+### 1. 定义工具
+
+在项目目录创建 `tools.py`：
+
+```python
+from axi import tool
+
+
+@tool(
+    name="query_orders",
+    description="按区域查询订单，返回订单金额和匹配总数；支持 cn、jp、us 区域",
+    output_example={
+        "orders": [{"id": 1, "region": "cn", "amount": 120}],
+        "total": 1,
+    },
+)
+def query_orders(region: str, limit: int = 10) -> dict:
+    orders = [
+        {"id": 1, "region": "cn", "amount": 120},
+        {"id": 2, "region": "jp", "amount": 80},
+        {"id": 3, "region": "us", "amount": 60},
+    ]
+    matched = [order for order in orders if order["region"] == region]
+    return {"orders": matched[:limit], "total": len(matched)}
 ```
 
-## 配置
+将 API 请求或 SDK 调用放进函数体，就可以用相同方式接入外部系统。axi 从函数签名和类型注解生成输入 schema；`description` 默认取 docstring，`output_example` 可选，用于帮助 Agent 编写结果处理代码。
 
-配置文件默认为 `~/.axi/axi.json`；项目级配置通过 `AXI_CONFIG` 环境变量指定（如 `export AXI_CONFIG=/path/to/project/axi.json`，或写进 direnv 的 `.envrc`）。每份配置对应一个独立的 daemon，多项目互不干扰。格式参考 `axi.json.example`：
+### 2. 注册并通过 CLI 调用
+
+在同一目录创建 `axi.json`：
 
 ```json
 {
-    "mcpServers": {
-        "jina": {
-            "command": "npx",
-            "args": ["jina-mcp-tools"],
-            "env": { "JINA_API_KEY": "your-key" }
-        },
-        "retrieval": {
-            "url": "http://localhost:8000/mcp"
-        }
-    },
-    "nativeTools": [
-        {"module": "my_project.tools"},
-        {"module": "./scripts/tools.py", "name": "scripts"}
-    ],
-    "search": {
-        "embedding": {
-            "provider": "jina"
-        }
-    },
-    "daemon": {
-        "idleTimeoutMinutes": 30
-    }
+  "nativeTools": [
+    {"module": "./tools.py", "name": "orders"}
+  ]
 }
 ```
 
-- **mcpServers** — MCP server 配置，key 名作为工具命名空间。支持 `command`（本地进程）和 `url`（HTTP streaming）两种模式
-- **nativeTools** — 原生 Python 工具，`module` 支持文件路径和模块路径，`name` 可选（省略则自动推导）
-- **search** — 搜索配置，`embedding` 段启用语义搜索（支持 Jina/OpenAI）
-- **daemon** — daemon 进程配置，如 idle 超时时间
+```bash
+export AXI_CONFIG="$PWD/axi.json"
 
-完整配置参考见 [docs/configuration.md](docs/configuration.md)。
+axi search "按区域查询订单" -k 3
+axi describe orders/query_orders
+axi run orders/query_orders --region cn --limit 5
+```
 
-## CLI 命令
-
-| 命令 | 说明 |
-|------|------|
-| `axi list [server]` | 列出所有 server 及工具 |
-| `axi search <query>` | 混合搜索工具（BM25 + Embedding，支持 `--top-k/-k`） |
-| `axi grep <pattern>` | 正则表达式搜索工具（支持 `--limit/-l`） |
-| `axi describe <tool>` | 查看工具完整 schema |
-| `axi run <tool> --key value` | 执行工具（也支持 `-j '{...}'` 传 JSON） |
-| `axi mcp` | 将 axi 工具导出为 MCP server（stdio / HTTP） |
-| `axi doctor` | 自检：配置、daemon、MCP 连接、embedding、native 工具来源；有问题非零退出 |
-| `axi daemon start` | 手动启动 daemon（通常无需手动，CLI 会自动拉起） |
-| `axi daemon status` | 查看 daemon 状态（PID、运行时长、空闲时长、工具数量等） |
-| `axi daemon stop` | 手动停止 daemon |
-
-所有输出统一为紧凑 JSON。`axi run` 返回统一信封：
+最后一条命令返回：
 
 ```json
-{"status": "success", "data": "..."}
-{"status": "error", "error": "错误信息"}
+{"status":"success","data":{"orders":[{"id":1,"region":"cn","amount":120}],"total":1}}
 ```
 
-## 注册原生工具
+配置默认读取 `~/.axi/axi.json`，**不会自动读取当前目录的 `axi.json`**。项目配置用 `AXI_CONFIG` 指定；相对 `.py` 路径以配置文件所在目录为基准。未指定 `name` 时，文件路径取文件名（不含扩展名），模块路径取最后一段作为工具组名。
+
+### 3. 通过 Python 批量调用
+
+沿用同一份 `AXI_CONFIG`，创建 `batch.py`：
 
 ```python
+import json
+from concurrent.futures import ThreadPoolExecutor
+
 from axi import tool
 
-@tool(name="query_orders", description="按区域查询订单")
-def query_orders(region: str, limit: int = 10) -> dict:
-    return {"orders": [...], "total": 42}
+query_orders = tool("orders/query_orders")
+
+
+def region_total(region: str) -> dict:
+    result = query_orders(region=region, limit=10)
+    return {
+        "region": region,
+        "amount": sum(order["amount"] for order in result["orders"]),
+    }
+
+
+# 三个独立查询并发执行，仅将聚合结果输出给模型
+with ThreadPoolExecutor(max_workers=3) as pool:
+    totals = list(pool.map(region_total, ["cn", "jp", "us"]))
+
+print(json.dumps(totals, ensure_ascii=False))
 ```
-
-装饰器自动从函数签名提取参数 schema。注册后同时获得 CLI 调用和 PTC 调用能力。
-可以只写 `@tool(name="query_orders")`，描述默认取函数 docstring。
-`nativeTools` 中的相对 `.py` 路径以 `AXI_CONFIG` 指向的配置文件目录为基准。
-
-## PTC（Programmatic Tool Calling）
-
-Agent 可以写 Python 代码批量调用工具，在本地做数据过滤和聚合，避免反复 LLM round-trip：
-
-```python
-from axi import tool
-
-search = tool("jina/jina_search")
-results = search(query="python async", count=5)
-```
-
-首次 PTC 调用会自动发现配置中的 `nativeTools` 和已安装包的 `axi.native_tools`
-entry_points；原生工具在进程内执行，MCP 工具通过 daemon 执行。
-
-## 导出为 MCP server
-
-用 axi 封装的工具写一次，既能 CLI 调用，也能一条命令变成 MCP server 给任何 MCP 客户端（Claude Desktop、Claude Code 等）使用：
 
 ```bash
-axi mcp                                  # 全部工具，元工具模式（search/grep/describe/run）
-axi mcp --server mytools                 # 只暴露一组工具，平铺模式
-axi mcp --server a,b --transport http --port 8321   # HTTP 长驻服务
+uv run --with axi-cli python batch.py
 ```
 
-两种暴露形态（互斥）：
+输出为 `[{"region": "cn", "amount": 120}, {"region": "jp", "amount": 80}, {"region": "us", "amount": 60}]`。
 
-- **平铺**（指定 `--server` 时默认）— 每个工具注册为独立 MCP tool，对端直接看到并调用。单 server 用裸工具名，多 server 加 `server__` 前缀
-- **元工具**（全量导出时默认）— 只暴露 `search` / `grep` / `describe` / `run` 四个工具，对端以渐进式披露的方式发现和调用，上下文占用恒定，工具再多也不吃 context
+`tool("server/name")` 接受关键字参数，成功直接返回工具数据，失败抛出 `RuntimeError`，不返回 CLI 的 `status/data` 信封。首次调用自动发现 `nativeTools` 和已安装包的 `axi.native_tools` entry points；原生工具在当前进程执行，MCP 工具通过 daemon 执行。同一脚本可以获取多个工具句柄，将前一个工具的结果交给下一个工具。
 
-`--flat` / `--meta` 可强制覆盖默认判定。
+批量处理前先通过 `describe` 查看输出示例或查阅工具契约；缺少返回结构时，可对只读工具做一次小规模调用确认。并发数按上游限流和工具状态约束设置，有顺序依赖的调用按顺序执行。
 
-MCP 客户端配置示例（stdio 由客户端拉起，用 `AXI_CONFIG` 锚定项目）：
+### 4. 导出为 MCP
+
+```bash
+# 全量工具：只暴露 search / grep / describe / run 四个元工具
+axi mcp
+
+# 直接暴露 orders 组中的工具
+axi mcp --server orders
+
+# 只允许发现和调用 orders 组，仍使用四个元工具
+axi mcp --server orders --meta
+```
+
+无需再写一份 MCP server。
+
+## 将已有 MCP 转为 CLI / PTC
+
+将已有 server 的启动方式或 HTTP 端点加入当前配置的 `mcpServers`，例如：
 
 ```json
 {
   "mcpServers": {
-    "my-tools": {
-      "command": "axi",
-      "args": ["mcp", "--server", "mytools"],
-      "env": { "AXI_CONFIG": "/path/to/project/axi.json" }
+    "jina": {
+      "command": "npx",
+      "args": ["jina-mcp-tools"],
+      "env": {"JINA_API_KEY": "your-key"}
+    },
+    "retrieval": {
+      "url": "http://localhost:8000/mcp",
+      "headers": {"Authorization": "Bearer your-token"}
     }
   }
 }
 ```
 
-## 搜索
-
-axi 提供两种搜索方式：
-
-- **`axi search`** — 混合搜索，默认 BM25 关键词搜索（bm25s + jieba 分词，支持中英文）。配置 `search.embedding` 后启用 BM25 + Embedding 混合搜索（RRF 融合排序，结果按相关性排序）
-- **`axi grep`** — 正则表达式搜索，按工具名和描述匹配
-
-结果按相关性排序返回，顺序本身即信号（不含分数：native 与 MCP 来自两套索引、分数不可比）。
-
-## Daemon 模式
-
-MCP 工具通过后台 daemon 长连接执行，支持有状态 MCP server（如 browser MCP）。
-
-```
-axi CLI ──(Unix socket)──> daemon ──(stdio)──> MCP server A
-                                   ──(stdio)──> MCP server B
-```
-
-### 自动管理
-
-执行 `axi search`、`describe`、`run` 等命令时，CLI 会自动检测 daemon 是否运行，未运行则自动拉起。大多数情况下无需手动管理。
-
-### 生命周期
-
-| 阶段 | 行为 |
-|------|------|
-| **启动** | 加载 `axi.json` → 连接所有 MCP server → 创建 Unix socket → 写入 PID 文件 → 启动 idle watchdog |
-| **运行** | 通过 `~/.axi/daemons/<hash>.sock` 监听请求，路由到对应 MCP server 执行 |
-| **空闲关闭** | 默认 30 分钟无活动自动关闭（每 60 秒检查一次；`status` 和 `shutdown` 请求不重置计时器） |
-| **手动关闭** | `axi daemon stop` 发送关闭指令，daemon 优雅退出 |
-| **信号关闭** | 收到 SIGTERM / SIGINT 时优雅关闭（清理 socket 和 PID 文件） |
-
-空闲超时可通过 `axi.json` 的 `daemon.idleTimeoutMinutes` 配置：
-
-```json
-{ "daemon": { "idleTimeoutMinutes": 60 } }
-```
-
-### 手动管理
+stdio server 使用 `command / args / env`，HTTP server 使用 `url / headers`。用实际服务和凭据替换示例；工具组名取 `mcpServers` 的 key，无需等于包名。
 
 ```bash
-axi daemon start     # 手动启动（通常不需要）
-axi daemon status    # 查看状态
-axi daemon stop      # 手动停止
+axi grep '^jina/'
+axi describe jina/jina_search
+axi run jina/jina_search --query "python async" --count 3
 ```
 
-`axi daemon status` 输出示例：
+同一个工具也能通过 `tool("jina/jina_search")(query="python async", count=3)` 在 Python 中调用，或与原生工具一起经 `axi mcp` 再导出。更改 MCP 配置后，停止旧 daemon，让下一次调用按新配置重新启动。
+
+## 在 MCP 客户端中使用 axi
+
+下面的客户端配置使用元工具模式，将多个工具组收敛到四个发现与执行入口：
 
 ```json
 {
-  "status": "running",
-  "pid": 12345,
-  "config_path": "/path/to/project/axi.json",
-  "uptime_seconds": 1800,
-  "idle_seconds": 120,
-  "idle_timeout_seconds": 1800,
-  "idle_remaining_seconds": 1680,
-  "server_tools": { "jina": 5, "browser": 3 },
-  "native_tools": 2
+  "mcpServers": {
+    "axi": {
+      "command": "axi",
+      "args": ["mcp"],
+      "env": {"AXI_CONFIG": "/absolute/path/to/axi.json"}
+    }
+  }
 }
 ```
 
-daemon 启动时先写 PID、再连 MCP server，最后才创建 socket。连接期间（uvx 拉起的
-官方 MCP 冷启动可能要几十秒）status 返回 `{"status": "starting", "pid": 12345}`，
-不是 `stopped`；`axi daemon start` 也会等到就绪或超时，超时但进程仍存活时提示
-"Daemon is still initializing" 而不是启动失败。
-再次调用会继续等待现有启动进程，避免重复拉起 daemon。
+客户端需能找到 `axi` 可执行文件；必要时使用其绝对路径。指定 `--server a,b` 时默认平铺，单组工具使用裸工具名，多组工具加 `server__` 前缀；`--flat / --meta` 可以覆盖默认模式。
 
-`axi daemon stop` 等目标 daemon 完成退出清理后再报告成功；并发启动的新实例不会
-延长这次等待。多个 MCP 会依次关闭，最多等待 60 秒；超时返回非零退出码并给出日志路径。
+HTTP 导出使用 `axi mcp --transport http --port 8321`，默认监听 `127.0.0.1`，端点为 `/mcp`。原生工具通过 `axi.env("API_KEY")` 读取变量时，优先使用当前请求的 `Axi-API-KEY` header，其次使用进程环境变量；CLI / stdio 下读取进程环境变量。
 
-### 文件位置
+## 命令与输出
 
-daemon 按配置文件隔离：每份 `AXI_CONFIG` 对应一个独立 daemon，运行时文件位于 `~/.axi/daemons/`，文件名为配置文件绝对路径的哈希：
+| 命令 | 用途 |
+|---|---|
+| `axi search <query> -k 5` | 按能力描述搜索工具，默认 BM25，可配置 embedding |
+| `axi grep <pattern> -l 10` | 用正则匹配工具完整名和描述 |
+| `axi list [server]` | 枚举工具组；可用逗号指定多组 |
+| `axi describe <tool>` | 查看完整输入 schema 和可选输出示例；支持逗号分隔批量查看 |
+| `axi run <tool> --key value` | 执行工具；复杂参数用 `-j '{"key":"value"}'` |
+| `axi mcp` | 导出为 MCP server，支持 stdio / HTTP |
+| `axi doctor` | 检查配置、工具来源、daemon、MCP 连接及 embedding 配置 |
+| `axi daemon start / status / stop` | 管理或检查后台连接进程 |
 
-| 文件 | 说明 |
-|------|------|
-| `<hash>.sock` | Unix socket，CLI 与 daemon 的通信通道 |
-| `<hash>.pid` | daemon 进程 PID，用于检测是否存活 |
-| `<hash>.log` | daemon 启动和错误日志 |
+工具命令输出 JSON。`axi run` 成功返回 `{"status":"success","data":...}`，失败返回 `{"status":"error","error":"..."}`；自动化处理要检查 `status`，工具执行失败不一定产生非零退出码。`daemon start / stop` 输出状态文本，`--help` 输出命令帮助。
 
-`axi daemon status` 的 `config_path` 字段显示当前 daemon 服务的配置文件。
+`--key value` 按目标输入 schema 解析：字符串字段保留原文，其他字段尝试解析 JSON 数字、布尔值、数组和对象。嵌套数据或需要明确类型时，用 `--json / -j` 传完整 JSON 对象。
 
-## 技术栈
+## 搜索与运行配置
 
-Python 3.12+ / [Typer](https://typer.tiangolo.com/) / [Pydantic](https://docs.pydantic.dev/) / [MCP SDK](https://github.com/modelcontextprotocol/python-sdk) / [bm25s](https://github.com/xhluca/bm25s) + [jieba](https://github.com/fxsjy/jieba) / [LangChain](https://python.langchain.com/)（Embedding）
+`search` 默认使用 BM25 关键词检索，支持中英文分词；`grep` 使用正则，不调用 embedding。可在配置中添加：
+
+```json
+{
+  "search": {
+    "embedding": {"provider": "jina"}
+  },
+  "daemon": {
+    "idleTimeoutMinutes": 30,
+    "requestTimeout": 120
+  }
+}
+```
+
+- embedding 支持 `jina / openai`，密钥可分别从 `JINA_API_KEY / OPENAI_API_KEY` 读取；配置后在支持的索引上通过 RRF 融合 BM25 与向量检索。
+- 当前 CLI 的原生工具使用本地 BM25 索引，MCP 工具使用 daemon 索引；结果按原生在前、MCP 在后合并，`-k / -l` 分别作用于两端，合并后可能超过指定数量。MCP 元工具模式使用合并索引，支持对两种来源统一做混合搜索。
+- MCP 调用经 daemon 保持长连接，支持有状态 server。需要访问 daemon 的命令会自动启动它；默认空闲 30 分钟关闭。`status: starting` 表示正在初始化，`status: running` 表示已就绪。
+- 每个配置文件路径对应独立 daemon，运行文件位于 `~/.axi/daemons/<hash>.sock / .pid / .log`。配置在进程启动时加载；MCP 配置修改后执行 `axi daemon stop`，已启动的 `axi mcp` 服务也需要重启。
+- 单个 daemon 请求默认等待 120 秒；可用 `daemon.requestTimeout` 或环境变量 `AXI_REQUEST_TIMEOUT` 调整。
+
+## Agent skills 与更多文档
+
+仓库提供两个可供 Agent 加载的技能目录；复制到所用 Agent 支持的 skills 目录时，保留目录内的 `references/`：
+
+- [axi-use](skills/axi-use/SKILL.md)：发现和调用已有工具，按任务选择 CLI 或 Python PTC。
+- [axi-creator](skills/axi-creator/SKILL.md)：封装函数 / API、接入 MCP，以及打包和导出工具。
+
+更多内容见 [使用指南](docs/guide.md)、[配置字段参考](docs/configuration.md)和[架构说明](docs/architecture.md)。命令参数以 `axi <command> --help` 为准。
 
 ## License
 
